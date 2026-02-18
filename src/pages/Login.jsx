@@ -1,10 +1,11 @@
 import React, { useState } from 'react';
 import { motion } from 'framer-motion';
 import { Mail, Lock, LogIn, ArrowRight, ShieldCheck } from 'lucide-react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 
 const Login = () => {
     const [focused, setFocused] = useState(null);
+    const navigate = useNavigate();
 
     return (
         <div className="min-h-screen flex flex-col items-center justify-center p-4">
@@ -91,6 +92,8 @@ const Login = () => {
                     <motion.button
                         whileHover={{ scale: 1.02 }}
                         whileTap={{ scale: 0.98 }}
+                        type="button"
+                        onClick={() => navigate('/dashboard')}
                         className="w-full bg-gradient-to-r from-hanghive-cyan to-hanghive-blue text-hanghive-dark font-bold py-3 rounded-lg flex items-center justify-center space-x-2 shadow-lg shadow-hanghive-cyan/20 group hover:glow-shadow-cyan transition-all"
                     >
                         <span>INITIALIZE_LOGIN</span>
