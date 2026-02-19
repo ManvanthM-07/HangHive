@@ -344,9 +344,13 @@ const LandingPage = () => {
                         style={{ background: 'radial-gradient(circle, rgba(0,229,255,0.1) 0%, transparent 70%)' }} />
 
                     <motion.div
-                        initial={{ opacity: 0, scale: 0.8 }}
-                        animate={{ opacity: 1, scale: 1 }}
-                        transition={{ duration: 0.8, ease: [0.16, 1, 0.3, 1] }}
+                        initial={{ opacity: 0, scale: 4, filter: 'blur(20px)' }}
+                        animate={{ opacity: 1, scale: 1, filter: 'blur(0px)' }}
+                        transition={{
+                            duration: 1.5,
+                            delay: 0.1,
+                            ease: [0.16, 1, 0.3, 1]
+                        }}
                         className="mb-8"
                     >
                         <motion.img
@@ -361,7 +365,7 @@ const LandingPage = () => {
                     <motion.div
                         initial={{ opacity: 0, y: 20 }}
                         animate={{ opacity: 1, y: 0 }}
-                        transition={{ delay: 0.2, duration: 0.7 }}
+                        transition={{ delay: 0.5, duration: 0.7 }}
                         className="mb-3"
                     >
                         <span className="text-xs font-mono text-hanghive-cyan tracking-[0.4em] uppercase opacity-70 group cursor-default">
@@ -370,9 +374,9 @@ const LandingPage = () => {
                     </motion.div>
 
                     <motion.h1
-                        initial={{ opacity: 0, y: 20 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        transition={{ delay: 0.3, duration: 0.7 }}
+                        initial={{ opacity: 0, letterSpacing: '-0.05em' }}
+                        animate={{ opacity: 1, letterSpacing: '0em' }}
+                        transition={{ delay: 0.6, duration: 1, ease: 'easeOut' }}
                         className="text-5xl md:text-7xl font-black tracking-tight mb-6 leading-none"
                     >
                         <span className="text-white">YOUR COMMUNITY,</span>
@@ -383,9 +387,9 @@ const LandingPage = () => {
                     </motion.h1>
 
                     <motion.p
-                        initial={{ opacity: 0, y: 20 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        transition={{ delay: 0.4, duration: 0.7 }}
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        transition={{ delay: 0.8, duration: 1 }}
                         className="text-gray-400 text-lg max-w-xl mb-10 leading-relaxed font-light"
                     >
                         HangHive is the next-gen platform for communities that refuse to be ordinary.
