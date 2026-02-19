@@ -18,6 +18,8 @@ const Dashboard = () => {
     const [videoWs, setVideoWs] = useState(null);
     const [isVoiceConnected, setIsVoiceConnected] = useState(false);
     const [isVideoConnected, setIsVideoConnected] = useState(false);
+    const [voiceParticipants, setVoiceParticipants] = useState([]);
+    const [videoParticipants, setVideoParticipants] = useState([]);
     const scrollRef = useRef(null);
 
     const rooms = [
@@ -41,8 +43,8 @@ const Dashboard = () => {
     useEffect(() => {
         if (!user) return;
 
-        const clientId = parseInt(user.id.split('-')[0], 16) || Date.now();
-        const socket = new WebSocket(`ws://${window.location.host}/ws/${activeRoom}/${clientId}`);
+        const clientId = user.id;
+        const socket = new WebSocket(`ws://${window.location.host}/ws/${activeRoom}/${clientId}?username=${encodeURIComponent(user.username)}`);
 
         socket.onopen = () => {
             console.log(`Connected to chat: ${activeRoom}`);
@@ -64,6 +66,8 @@ const Dashboard = () => {
         return () => {
             if (voiceWs) voiceWs.close();
             if (videoWs) videoWs.close();
+            setVoiceParticipants([]);
+            setVideoParticipants([]);
         };
     }, [activeRoom]);
 
@@ -72,17 +76,23 @@ const Dashboard = () => {
             voiceWs?.close();
             setVoiceWs(null);
             setIsVoiceConnected(false);
+            setVoiceParticipants([]);
             return;
         }
 
-        const clientId = user.username.toLowerCase().replace(/\s/g, '_');
-        const socket = new WebSocket(`ws://${window.location.host}/ws/voice/${activeRoom}/${clientId}`);
+        const clientId = user.id.split('-')[0];
+        const socket = new WebSocket(`ws://${window.location.host}/ws/voice/${activeRoom}/${clientId}?username=${encodeURIComponent(user.username)}`);
 
         socket.onopen = () => setIsVoiceConnected(true);
-        socket.onclose = () => setIsVoiceConnected(false);
+        socket.onclose = () => {
+            setIsVoiceConnected(false);
+            setVoiceParticipants([]);
+        };
         socket.onmessage = (e) => {
             const data = JSON.parse(e.data);
-            console.log("Voice Signaling Payload:", data);
+            if (data.type === 'voice_participants') {
+                setVoiceParticipants(data.participants);
+            }
         };
 
         setVoiceWs(socket);
@@ -93,21 +103,76 @@ const Dashboard = () => {
             videoWs?.close();
             setVideoWs(null);
             setIsVideoConnected(false);
+            setVideoParticipants([]);
             return;
         }
 
-        const clientId = user.username.toLowerCase().replace(/\s/g, '_');
-        const socket = new WebSocket(`ws://${window.location.host}/ws/video/${activeRoom}/${clientId}`);
+        const clientId = user.id.split('-')[0];
+        const socket = new WebSocket(`ws://${window.location.host}/ws/video/${activeRoom}/${clientId}?username=${encodeURIComponent(user.username)}`);
 
         socket.onopen = () => setIsVideoConnected(true);
-        socket.onclose = () => setIsVideoConnected(false);
+        socket.onclose = () => {
+            setIsVideoConnected(false);
+            setVideoParticipants([]);
+        };
         socket.onmessage = (e) => {
             const data = JSON.parse(e.data);
-            console.log("Video Signaling Payload:", data);
+            if (data.type === 'video_participants') {
+                setVideoParticipants(data.participants);
+            }
         };
 
         setVideoWs(socket);
     };
+
+    const CallOverlay = ({ type, participants, onLeave }) => (
+        <motion.div
+            initial={{ opacity: 0, scale: 0.9 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.9 }}
+            className="absolute top-20 right-8 z-40 w-64 bg-[#08080c]/95 backdrop-blur-md border border-white/10 rounded-2xl p-4 shadow-2xl"
+        >
+            <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2">
+                    {type === 'voice' ? <Mic className="w-4 h-4 text-green-400" /> : <Video className="w-4 h-4 text-hanghive-cyan" />}
+                    <span className="text-xs font-bold uppercase tracking-widest text-white">
+                        {type === 'voice' ? 'Voice Session' : 'Video Stream'}
+                    </span>
+                </div>
+                <button
+                    onClick={onLeave}
+                    className="p-1 hover:bg-red-500/20 text-gray-500 hover:text-red-400 rounded transition-all"
+                >
+                    <LogOut className="w-4 h-4" />
+                </button>
+            </div>
+            <div className="space-y-3">
+                {participants.map((p) => (
+                    <div key={p.id} className="flex items-center gap-3">
+                        <div className="w-8 h-8 rounded-lg bg-white/5 flex items-center justify-center font-bold text-[10px] text-gray-400 border border-white/5">
+                            {p.name.slice(0, 2).toUpperCase()}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                            <div className="text-xs font-bold text-white truncate">{p.name}</div>
+                            <div className="text-[10px] text-gray-500 font-mono tracking-tighter">
+                                {p.id === user.id ? 'STREAMS_ACTIVE' : 'RECEIVING_DATA'}
+                            </div>
+                        </div>
+                    </div>
+                ))}
+            </div>
+            <div className="mt-4 pt-4 border-t border-white/5 flex gap-2">
+                <div className="flex-1 h-8 rounded-lg bg-white/5 flex items-center justify-center cursor-pointer hover:bg-white/10 transition-all">
+                    <Mic className="w-3.5 h-3.5" />
+                </div>
+                {type === 'video' && (
+                    <div className="flex-1 h-8 rounded-lg bg-white/5 flex items-center justify-center cursor-pointer hover:bg-white/10 transition-all">
+                        <Video className="w-3.5 h-3.5" />
+                    </div>
+                )}
+            </div>
+        </motion.div>
+    );
 
     useEffect(() => {
         scrollRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -236,7 +301,24 @@ const Dashboard = () => {
             </div>
 
             {/* Chat Area */}
-            <div className="flex-1 flex flex-col bg-[#0b0b12]">
+            <div className="flex-1 flex flex-col bg-[#0b0b12] relative">
+                <AnimatePresence>
+                    {isVoiceConnected && (
+                        <CallOverlay
+                            type="voice"
+                            participants={voiceParticipants}
+                            onLeave={handleVoiceClick}
+                        />
+                    )}
+                    {isVideoConnected && (
+                        <CallOverlay
+                            type="video"
+                            participants={videoParticipants}
+                            onLeave={handleVideoClick}
+                        />
+                    )}
+                </AnimatePresence>
+
                 <div className="h-14 border-b border-white/5 flex items-center px-4 justify-between">
                     <div className="flex items-center gap-2 font-bold text-white">
                         <Hash className="w-5 h-5 text-gray-600" />
@@ -276,7 +358,7 @@ const Dashboard = () => {
                                     <div className="flex-1">
                                         <div className="flex items-baseline gap-2">
                                             <span className="text-sm font-bold text-white hover:underline cursor-pointer">
-                                                {msg.sender === (parseInt(user.id.split('-')[0], 16) || 0) ? user.username : `User #${msg.sender}`}
+                                                {msg.sender === user.id ? user.username : (msg.sender_name || `User #${msg.sender}`)}
                                             </span>
                                             <span className="text-[10px] text-gray-600 font-mono">TODAY AT {new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
                                         </div>

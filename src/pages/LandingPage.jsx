@@ -34,7 +34,7 @@ const LoginModal = ({ onClose }) => {
         setLoading(true);
         setError('');
 
-        const endpoint = isSignup ? '/api/users/create' : '/api/users/login';
+        const endpoint = isSignup ? '/signup' : '/login';
 
         try {
             const response = await fetch(endpoint, {
@@ -46,7 +46,12 @@ const LoginModal = ({ onClose }) => {
             const data = await response.json();
 
             if (!response.ok) {
-                throw new Error(data.detail || 'Authentication failed');
+                const errorMessage = typeof data.detail === 'string'
+                    ? data.detail
+                    : Array.isArray(data.detail)
+                        ? data.detail.map(err => `${err.loc.join('.')}: ${err.msg}`).join(', ')
+                        : 'Authentication failed';
+                throw new Error(errorMessage);
             }
 
             // Success: store user and navigate
