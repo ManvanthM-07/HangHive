@@ -1,6 +1,6 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Mail, Lock, LogIn, UserPlus, ArrowRight, Zap, Users, Shield, Globe, AlertCircle, Loader2 } from 'lucide-react';
+import { Mail, Lock, LogIn, UserPlus, ArrowRight, Zap, Users, Shield, Globe, AlertCircle, Loader2, MessageSquare, Mic, Video, Palette, Gamepad2, Book, Coffee, Briefcase, Terminal, Rocket, Hash, Search, Plus } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import TechnicalBackground from '../components/TechnicalBackground';
 
@@ -43,12 +43,19 @@ const LoginModal = ({ onClose }) => {
                 body: JSON.stringify(formData)
             });
 
-            const data = await response.json();
+            const contentType = response.headers.get('content-type');
+            let data;
+            if (contentType && contentType.includes('application/json')) {
+                data = await response.json();
+            } else {
+                const text = await response.text();
+                throw new Error(`Server returned non-JSON response: ${text.substring(0, 100)}...`);
+            }
 
             if (!response.ok) {
-                const errorMessage = typeof data.detail === 'string'
+                const errorMessage = data && typeof data.detail === 'string'
                     ? data.detail
-                    : Array.isArray(data.detail)
+                    : data && Array.isArray(data.detail)
                         ? data.detail.map(err => `${err.loc.join('.')}: ${err.msg}`).join(', ')
                         : 'Authentication failed';
                 throw new Error(errorMessage);
@@ -230,22 +237,53 @@ const LoginModal = ({ onClose }) => {
 };
 
 // ─── Feature Card ─────────────────────────────────────────────────────────────
-const FeatureCard = ({ icon: Icon, title, desc, color, delay }) => (
+const FeatureCard = ({ icon: Icon, title, desc, color, delay, tag }) => (
     <motion.div
         initial={{ opacity: 0, y: 30 }}
-        animate={{ opacity: 1, y: 0 }}
+        whileInView={{ opacity: 1, y: 0 }}
+        viewport={{ once: true }}
         transition={{ delay, duration: 0.6, ease: 'easeOut' }}
-        whileHover={{ y: -4, scale: 1.02 }}
+        whileHover={{ y: -6, scale: 1.02 }}
         className="relative p-6 rounded-2xl border border-white/10 overflow-hidden group cursor-default"
-        style={{ background: 'rgba(255,255,255,0.03)' }}
+        style={{ background: 'rgba(255,255,255,0.02)' }}
     >
         <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-500"
-            style={{ background: `radial-gradient(circle at 50% 0%, ${color}15, transparent 70%)` }} />
-        <div className="w-10 h-10 rounded-xl flex items-center justify-center mb-4" style={{ backgroundColor: color + '20', border: `1px solid ${color}40` }}>
+            style={{ background: `radial-gradient(circle at 30% 0%, ${color}18, transparent 65%)` }} />
+        <div className="absolute top-4 right-4">
+            {tag && <span className="text-[8px] font-mono px-2 py-0.5 rounded border" style={{ color, borderColor: color + '40', background: color + '10' }}>{tag}</span>}
+        </div>
+        <div className="w-11 h-11 rounded-xl flex items-center justify-center mb-4 relative z-10"
+            style={{ backgroundColor: color + '15', border: `1px solid ${color}35` }}>
             <Icon className="w-5 h-5" style={{ color }} />
         </div>
-        <h3 className="text-white font-bold text-sm mb-2 font-mono">{title}</h3>
-        <p className="text-gray-400 text-xs leading-relaxed">{desc}</p>
+        <h3 className="text-white font-bold text-sm mb-2 font-mono relative z-10">{title}</h3>
+        <p className="text-gray-500 text-xs leading-relaxed relative z-10">{desc}</p>
+        <div className="absolute bottom-0 left-0 right-0 h-[1px] scale-x-0 group-hover:scale-x-100 transition-transform duration-500 origin-left"
+            style={{ background: `linear-gradient(to right, ${color}60, transparent)` }} />
+    </motion.div>
+);
+
+// ─── Community Type Card ─────────────────────────────────────────────────────
+const CommunityCard = ({ icon: Icon, label, desc, color, delay }) => (
+    <motion.div
+        initial={{ opacity: 0, scale: 0.9 }}
+        whileInView={{ opacity: 1, scale: 1 }}
+        viewport={{ once: true }}
+        transition={{ delay, duration: 0.5 }}
+        whileHover={{ y: -4, scale: 1.03 }}
+        className="relative p-5 rounded-2xl border border-white/5 overflow-hidden group cursor-default"
+        style={{ background: 'rgba(255,255,255,0.02)' }}
+    >
+        <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-all duration-500"
+            style={{ background: `radial-gradient(circle at 50% 100%, ${color}14, transparent 70%)` }} />
+        <div className="w-12 h-12 rounded-2xl flex items-center justify-center mb-3"
+            style={{ background: color + '15', border: `1px solid ${color}30` }}>
+            <Icon className="w-6 h-6" style={{ color }} />
+        </div>
+        <div className="text-xs font-bold text-white font-mono mb-1">{label}</div>
+        <div className="text-[9px] text-gray-600 uppercase tracking-wider font-mono">{desc}</div>
+        <div className="absolute top-3 right-3 w-1.5 h-1.5 rounded-full opacity-0 group-hover:opacity-100 transition-opacity"
+            style={{ background: color, boxShadow: `0 0 6px ${color}` }} />
     </motion.div>
 );
 
@@ -257,9 +295,14 @@ const LandingPage = () => {
     const featuresRef = React.useRef(null);
 
     useEffect(() => {
-        const storedUser = localStorage.getItem('hanghive_user');
-        if (storedUser) {
-            setUser(JSON.parse(storedUser));
+        try {
+            const storedUser = localStorage.getItem('hanghive_user');
+            if (storedUser) {
+                setUser(JSON.parse(storedUser));
+            }
+        } catch (e) {
+            console.error("Failed to parse user data", e);
+            localStorage.removeItem('hanghive_user');
         }
     }, []);
 
@@ -268,10 +311,47 @@ const LandingPage = () => {
     };
 
     const features = [
-        { icon: Zap, title: 'REAL_TIME_CHAT', desc: 'Instant messaging with zero latency across all your communities.', color: '#00e5ff', delay: 0.5 },
-        { icon: Users, title: 'COMMUNITY_HUBS', desc: 'Create or join hives — organized spaces for your crew.', color: '#d500f9', delay: 0.6 },
-        { icon: Shield, title: 'ENCRYPTED_COMMS', desc: 'AES-256 encrypted channels. Your data stays yours.', color: '#2979ff', delay: 0.7 },
-        { icon: Globe, title: 'GLOBAL_NETWORK', desc: 'Connect with nodes worldwide. No borders, no limits.', color: '#76ff03', delay: 0.8 },
+        {
+            icon: MessageSquare, title: 'REAL_TIME_CHAT', tag: 'LIVE',
+            desc: 'WebSocket-powered instant messaging across community rooms. Zero latency, always in sync.',
+            color: '#00e5ff', delay: 0.1
+        },
+        {
+            icon: Mic, title: 'VOICE_CHANNELS', tag: 'ACTIVE',
+            desc: 'Jump into live voice rooms within any community. Crystal-clear audio with real-time participant indicators.',
+            color: '#d500f9', delay: 0.15
+        },
+        {
+            icon: Video, title: 'VIDEO_CALLS', tag: 'BETA',
+            desc: 'WebRTC-powered peer-to-peer video sessions inside your community nodes.',
+            color: '#2979ff', delay: 0.2
+        },
+        {
+            icon: Search, title: 'COMMUNITY_DISCOVERY', tag: 'OPEN',
+            desc: 'Browse the global hive — find and join any public community node from the discovery panel.',
+            color: '#76ff03', delay: 0.25
+        },
+        {
+            icon: Shield, title: 'PRIVATE_NODES', tag: 'SECURE',
+            desc: 'Create encrypted private communities with access-code protection. Only invited members enter.',
+            color: '#ff9100', delay: 0.3
+        },
+        {
+            icon: Hash, title: 'COMMUNITY_ROOMS', tag: 'MULTI',
+            desc: 'Each community has its own rooms — lounge, broadcast, topic channels — keeping conversations organized.',
+            color: '#f50057', delay: 0.35
+        },
+    ];
+
+    const communityTypes = [
+        { icon: Globe, label: 'GENERAL', desc: 'OPEN_LOUNGE', color: '#00e5ff', delay: 0 },
+        { icon: Gamepad2, label: 'GAMING', desc: 'HIGH_PERFORMANCE_HUB', color: '#7c4dff', delay: 0.05 },
+        { icon: Palette, label: 'ART', desc: 'CREATIVE_CANVAS', color: '#ff4081', delay: 0.1 },
+        { icon: Book, label: 'STUDY', desc: 'KNOWLEDGE_BASE', color: '#00e676', delay: 0.15 },
+        { icon: Coffee, label: 'FRIENDS', desc: 'SOCIAL_NODE', color: '#ff9100', delay: 0.2 },
+        { icon: Briefcase, label: 'WORK', desc: 'PRO_OPERATIONS', color: '#2979ff', delay: 0.25 },
+        { icon: Terminal, label: 'PERSONAL', desc: 'PRIVATE_PROTOCOL', color: '#76ff03', delay: 0.3 },
+        { icon: Rocket, label: 'OTHERS', desc: 'EXTENDED_HUB', color: '#f50057', delay: 0.35 },
     ];
 
     return (
@@ -344,10 +424,10 @@ const LandingPage = () => {
                         style={{ background: 'radial-gradient(circle, rgba(0,229,255,0.1) 0%, transparent 70%)' }} />
 
                     <motion.div
-                        initial={{ opacity: 0, scale: 4, filter: 'blur(20px)' }}
-                        animate={{ opacity: 1, scale: 1, filter: 'blur(0px)' }}
+                        initial={{ opacity: 0, scale: 1.05 }}
+                        animate={{ opacity: 1, scale: 1 }}
                         transition={{
-                            duration: 1.5,
+                            duration: 1.2,
                             delay: 0.1,
                             ease: [0.16, 1, 0.3, 1]
                         }}
@@ -369,7 +449,7 @@ const LandingPage = () => {
                         className="mb-3"
                     >
                         <span className="text-xs font-mono text-hanghive-cyan tracking-[0.4em] uppercase opacity-70 group cursor-default">
-                            {user ? `// WELCOME BACK, ${user.username.toUpperCase()}` : '// WELCOME TO THE HIVE'}
+                            {user ? `// WELCOME BACK, ${(user?.username || 'USER').toUpperCase()}` : '// WELCOME TO THE HIVE'}
                         </span>
                     </motion.div>
 
@@ -392,8 +472,8 @@ const LandingPage = () => {
                         transition={{ delay: 0.8, duration: 1 }}
                         className="text-gray-400 text-lg max-w-xl mb-10 leading-relaxed font-light"
                     >
-                        HangHive is the next-gen platform for communities that refuse to be ordinary.
-                        Real-time chat, voice, and collaboration — all in one cyberpunk-grade hub.
+                        HangHive is your next-gen community OS. Real-time chat, voice, video,
+                        community discovery and private encrypted nodes — all in one cyberpunk-grade hub.
                     </motion.p>
 
                     <motion.div
@@ -447,21 +527,79 @@ const LandingPage = () => {
                     </motion.div>
                 </main>
 
+                {/* Community Types Showcase */}
+                <section className="px-8 pb-16 max-w-5xl mx-auto w-full">
+                    <motion.div
+                        initial={{ opacity: 0 }}
+                        whileInView={{ opacity: 1 }}
+                        viewport={{ once: true }}
+                        className="text-center mb-10"
+                    >
+                        <p className="text-xs font-mono text-hanghive-cyan tracking-[0.4em] uppercase opacity-70 mb-2">// NODE_TYPES</p>
+                        <h2 className="text-3xl font-bold text-white tracking-tight">8 types of community nodes</h2>
+                        <p className="text-gray-500 text-sm mt-2">From gaming crews to study groups — every vibe has a node.</p>
+                    </motion.div>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
+                        {communityTypes.map(t => <CommunityCard key={t.label} {...t} />)}
+                    </div>
+                </section>
+
                 {/* Features */}
-                <section ref={featuresRef} className="px-8 pb-32 max-w-5xl mx-auto w-full pt-20">
+                <section ref={featuresRef} className="px-8 pb-24 max-w-5xl mx-auto w-full pt-8">
                     <motion.div
                         initial={{ opacity: 0 }}
                         whileInView={{ opacity: 1 }}
                         viewport={{ once: true }}
                         transition={{ duration: 1 }}
-                        className="text-center mb-16"
+                        className="text-center mb-12"
                     >
                         <p className="text-xs font-mono text-hanghive-purple tracking-[0.4em] uppercase opacity-70 mb-2">// CORE_MODULES</p>
                         <h2 className="text-4xl font-bold text-white tracking-tight">Everything your community needs</h2>
+                        <p className="text-gray-500 text-sm mt-2 max-w-lg mx-auto">Built on WebSockets and WebRTC. Everything runs in real-time, inside your node.</p>
                     </motion.div>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
-                        {features.map((f) => <FeatureCard key={f.title} {...f} />)}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
+                        {features.map(f => <FeatureCard key={f.title} {...f} />)}
                     </div>
+                </section>
+
+                {/* How it works strip */}
+                <section className="px-8 pb-24 max-w-5xl mx-auto w-full">
+                    <motion.div
+                        initial={{ opacity: 0 }}
+                        whileInView={{ opacity: 1 }}
+                        viewport={{ once: true }}
+                        className="rounded-3xl border border-white/5 p-8 relative overflow-hidden"
+                        style={{ background: 'rgba(255,255,255,0.02)' }}
+                    >
+                        <div className="absolute inset-0 pointer-events-none"
+                            style={{ background: 'radial-gradient(ellipse 60% 80% at 50% 100%, rgba(0,229,255,0.05), transparent)' }} />
+                        <p className="text-xs font-mono text-hanghive-cyan tracking-[0.4em] uppercase opacity-70 mb-3 text-center">// HOW_IT_WORKS</p>
+                        <h2 className="text-3xl font-bold text-white text-center mb-10 tracking-tight">Join the hive in 3 steps</h2>
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+                            {[
+                                { step: '01', icon: UserPlus, title: 'CREATE_ACCOUNT', desc: 'Sign up instantly. No email verification, no friction. Your node is ready.', color: '#00e5ff' },
+                                { step: '02', icon: Search, title: 'DISCOVER_NODES', desc: 'Browse the global community grid. Join any public hive or create your own.', color: '#d500f9' },
+                                { step: '03', icon: MessageSquare, title: 'CONNECT_LIVE', desc: 'Chat, voice, and video — all inside your community the moment you join.', color: '#76ff03' },
+                            ].map(({ step, icon: Icon, title, desc, color }, i) => (
+                                <motion.div
+                                    key={step}
+                                    initial={{ opacity: 0, y: 20 }}
+                                    whileInView={{ opacity: 1, y: 0 }}
+                                    viewport={{ once: true }}
+                                    transition={{ delay: i * 0.1, duration: 0.5 }}
+                                    className="text-center relative"
+                                >
+                                    <div className="w-12 h-12 rounded-2xl flex items-center justify-center mx-auto mb-4"
+                                        style={{ background: color + '15', border: `1px solid ${color}30` }}>
+                                        <Icon className="w-6 h-6" style={{ color }} />
+                                    </div>
+                                    <div className="text-[10px] font-mono" style={{ color }}>{step}</div>
+                                    <div className="text-sm font-bold text-white font-mono mt-1 mb-2">{title}</div>
+                                    <div className="text-xs text-gray-500 leading-relaxed">{desc}</div>
+                                </motion.div>
+                            ))}
+                        </div>
+                    </motion.div>
                 </section>
 
                 {/* Footer */}

@@ -9,26 +9,26 @@ function App() {
     const [showIntro, setShowIntro] = React.useState(true);
 
     return (
-        <AnimatePresence>
-            {showIntro ? (
-                <Intro key="intro" onComplete={() => setShowIntro(false)} />
-            ) : (
-                <motion.div
-                    key="main-app"
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    transition={{ duration: 1.5, ease: "easeOut" }}
-                >
-                    <BrowserRouter>
+        <BrowserRouter>
+            <AnimatePresence mode="wait">
+                {showIntro ? (
+                    <Intro key="intro" onComplete={() => setShowIntro(false)} />
+                ) : (
+                    <motion.div
+                        key="main-app"
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        transition={{ duration: 0.8 }}
+                    >
                         <Routes>
                             <Route path="/" element={<LandingPage />} />
                             <Route path="/dashboard" element={<Dashboard />} />
                             <Route path="*" element={<Navigate to="/" replace />} />
                         </Routes>
-                    </BrowserRouter>
-                </motion.div>
-            )}
-        </AnimatePresence>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+        </BrowserRouter>
     );
 }
 
