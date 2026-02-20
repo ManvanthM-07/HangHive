@@ -6,7 +6,7 @@ import {
     Settings, Search, Bell, Plus, LogOut,
     Send, Terminal, Shield, Zap, Globe, LogIn,
     Palette, Gamepad2, Book, Coffee, Briefcase, Rocket,
-    ChevronRight
+    ChevronRight, Lock
 } from 'lucide-react';
 
 const Dashboard = () => {
@@ -28,6 +28,9 @@ const Dashboard = () => {
     const [voiceParticipants, setVoiceParticipants] = useState([]);
     const [videoParticipants, setVideoParticipants] = useState([]);
     const scrollRef = useRef(null);
+    const localStream = useRef(null);
+    const peerConnections = useRef({}); // client_id -> RTCPeerConnection
+    const [remoteStreams, setRemoteStreams] = useState({}); // client_id -> MediaStream
 
     // Dynamic Rooms per community (mock for now, will be dynamic later)
     const communityRooms = {
@@ -39,8 +42,19 @@ const Dashboard = () => {
     };
 
     const currentRooms = communityRooms[activeCommunity] || [
-        { id: 'general', name: 'general-chat', icon: Hash }
+        { id: 'lobby', name: 'lobby', icon: Hash }
     ];
+
+    const handleSwitchCommunity = (commId) => {
+        setActiveCommunity(commId);
+        // Default to 'lobby' or first available room, ensuring we never have an undefined activeRoom
+        const rooms = communityRooms[commId] || [{ id: 'lobby', name: 'lobby', icon: Hash }];
+        if (rooms.length > 0) {
+            setActiveRoom(rooms[0].id);
+        } else {
+            setActiveRoom('lobby');
+        }
+    };
 
     // Icon & Color Mapping based on Purpose
     const getCommunityMeta = (purpose) => {
@@ -121,13 +135,15 @@ const Dashboard = () => {
 
     // Chat WebSocket session
     useEffect(() => {
-        if (!user) return;
+        if (!user || !user.id) return;
 
-        const clientId = user.id;
-        const socket = new WebSocket(`ws://${window.location.host}/ws/${activeRoom}/${clientId}?username=${encodeURIComponent(user.username)}`);
+        const clientId = String(user.id).split('-')[0];
+        // Unique room key to prevent cross-community chat leaks and registry collisions
+        const roomKey = `${activeCommunity}-${activeRoom}`;
+        const socket = new WebSocket(`ws://${window.location.host}/ws/${roomKey}/${clientId}?username=${encodeURIComponent(user.username)}`);
 
         socket.onopen = () => {
-            console.log(`Connected to chat: ${activeRoom}`);
+            console.log(`Connected to chat: ${roomKey} as ${clientId}`);
             setMessages([]);
         };
 
@@ -138,8 +154,11 @@ const Dashboard = () => {
 
         setWs(socket);
 
-        return () => socket.close();
-    }, [user, activeRoom]);
+        return () => {
+            console.log("Cleaning up WebSocket session...");
+            socket.close();
+        };
+    }, [user, activeCommunity, activeRoom]);
 
     // Cleanup voice/video on unmount or room change
     useEffect(() => {
@@ -151,60 +170,199 @@ const Dashboard = () => {
         };
     }, [activeRoom]);
 
-    const handleVoiceClick = () => {
+    const handleVoiceClick = async () => {
         if (isVoiceConnected) {
             voiceWs?.close();
             setVoiceWs(null);
             setIsVoiceConnected(false);
             setVoiceParticipants([]);
+            // Cleanup WebRTC
+            if (localStream.current) {
+                localStream.current.getTracks().forEach(track => track.stop());
+                localStream.current = null;
+            }
+            Object.values(peerConnections.current).forEach(pc => pc.close());
+            peerConnections.current = {};
+
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(`ENDED_VOICE_CALL`);
+            }
             return;
         }
 
         if (!user || !user.id) return;
         const clientId = String(user.id).split('-')[0];
-        const socket = new WebSocket(`ws://${window.location.host}/ws/voice/${activeRoom}/${clientId}?username=${encodeURIComponent(user.username)}`);
+        const roomKey = `${activeCommunity}-${activeRoom}`;
 
-        socket.onopen = () => setIsVoiceConnected(true);
-        socket.onclose = () => {
-            setIsVoiceConnected(false);
-            setVoiceParticipants([]);
-        };
-        socket.onmessage = (e) => {
-            const data = JSON.parse(e.data);
-            if (data.type === 'voice_participants') {
-                setVoiceParticipants(data.participants);
-            }
-        };
+        try {
+            localStream.current = await navigator.mediaDevices.getUserMedia({ audio: true });
+            const socket = new WebSocket(`ws://${window.location.host}/ws/voice/${roomKey}/${clientId}?username=${encodeURIComponent(user.username)}`);
 
-        setVoiceWs(socket);
+            socket.onopen = () => {
+                setIsVoiceConnected(true);
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(`STARTED_VOICE_CALL`);
+                }
+            };
+
+            socket.onmessage = async (e) => {
+                const data = JSON.parse(e.data);
+                if (data.type === 'voice_participants') {
+                    setVoiceParticipants(data.participants);
+                    // Participants list changed, check for new users
+                    data.participants.forEach(p => {
+                        if (p.id !== clientId && !peerConnections.current[p.id]) {
+                            createPeer(p.id, true, 'voice', socket);
+                        }
+                    });
+                } else if (data.type === 'offer') {
+                    await createPeer(data.sender, false, 'voice', socket, data.offer);
+                } else if (data.type === 'answer') {
+                    await peerConnections.current[data.sender]?.setRemoteDescription(new RTCSessionDescription(data.answer));
+                } else if (data.type === 'candidate') {
+                    await peerConnections.current[data.sender]?.addIceCandidate(new RTCIceCandidate(data.candidate));
+                }
+            };
+
+            setVoiceWs(socket);
+        } catch (err) {
+            console.error("Failed to start voice call:", err);
+        }
     };
 
-    const handleVideoClick = () => {
+    const handleVideoClick = async () => {
         if (isVideoConnected) {
             videoWs?.close();
             setVideoWs(null);
             setIsVideoConnected(false);
             setVideoParticipants([]);
+            // Cleanup WebRTC
+            if (localStream.current) {
+                localStream.current.getTracks().forEach(track => track.stop());
+                localStream.current = null;
+            }
+            Object.values(peerConnections.current).forEach(pc => pc.close());
+            peerConnections.current = {};
+
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(`ENDED_VIDEO_STREAM`);
+            }
             return;
         }
 
         if (!user || !user.id) return;
         const clientId = String(user.id).split('-')[0];
-        const socket = new WebSocket(`ws://${window.location.host}/ws/video/${activeRoom}/${clientId}?username=${encodeURIComponent(user.username)}`);
+        const roomKey = `${activeCommunity}-${activeRoom}`;
 
-        socket.onopen = () => setIsVideoConnected(true);
-        socket.onclose = () => {
-            setIsVideoConnected(false);
-            setVideoParticipants([]);
-        };
-        socket.onmessage = (e) => {
-            const data = JSON.parse(e.data);
-            if (data.type === 'video_participants') {
-                setVideoParticipants(data.participants);
+        try {
+            localStream.current = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+            const socket = new WebSocket(`ws://${window.location.host}/ws/video/${roomKey}/${clientId}?username=${encodeURIComponent(user.username)}`);
+
+            socket.onopen = () => {
+                setIsVideoConnected(true);
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(`STARTED_VIDEO_STREAM`);
+                }
+            };
+
+            socket.onmessage = async (e) => {
+                const data = JSON.parse(e.data);
+                if (data.type === 'video_participants') {
+                    setVideoParticipants(data.participants);
+                    data.participants.forEach(p => {
+                        if (p.id !== clientId && !peerConnections.current[p.id]) {
+                            createPeer(p.id, true, 'video', socket);
+                        }
+                    });
+                } else if (data.type === 'offer') {
+                    await createPeer(data.sender, false, 'video', socket, data.offer);
+                } else if (data.type === 'answer') {
+                    await peerConnections.current[data.sender]?.setRemoteDescription(new RTCSessionDescription(data.answer));
+                } else if (data.type === 'candidate') {
+                    await peerConnections.current[data.sender]?.addIceCandidate(new RTCIceCandidate(data.candidate));
+                }
+            };
+
+            setVideoWs(socket);
+        } catch (err) {
+            console.error("Failed to start video call:", err);
+        }
+    };
+
+    const createPeer = async (targetId, initiator, type, socket, offer = null) => {
+        if (peerConnections.current[targetId]) return;
+
+        const pc = new RTCPeerConnection({
+            iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+        });
+
+        peerConnections.current[targetId] = pc;
+
+        if (localStream.current) {
+            localStream.current.getTracks().forEach(track => {
+                pc.addTrack(track, localStream.current);
+            });
+        }
+
+        pc.onicecandidate = (event) => {
+            if (event.candidate) {
+                socket.send(JSON.stringify({
+                    type: "candidate",
+                    target: targetId,
+                    sender: String(user.id).split('-')[0],
+                    candidate: event.candidate
+                }));
             }
         };
 
-        setVideoWs(socket);
+        pc.ontrack = (event) => {
+            console.log(`Received remote track from ${targetId}`, event.streams[0]);
+            setRemoteStreams(prev => ({
+                ...prev,
+                [targetId]: event.streams[0]
+            }));
+        };
+
+        pc.oniceconnectionstatechange = () => {
+            if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'closed') {
+                pc.close();
+                delete peerConnections.current[targetId];
+                setRemoteStreams(prev => {
+                    const next = { ...prev };
+                    delete next[targetId];
+                    return next;
+                });
+            }
+        };
+
+        if (initiator) {
+            try {
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+                socket.send(JSON.stringify({
+                    type: "offer",
+                    target: targetId,
+                    sender: String(user.id).split('-')[0],
+                    offer: offer
+                }));
+            } catch (err) {
+                console.error("Create Offer failed:", err);
+            }
+        } else if (offer) {
+            try {
+                await pc.setRemoteDescription(new RTCSessionDescription(offer));
+                const answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
+                socket.send(JSON.stringify({
+                    type: "answer",
+                    target: targetId,
+                    sender: String(user.id).split('-')[0],
+                    answer: answer
+                }));
+            } catch (err) {
+                console.error("Create Answer failed:", err);
+            }
+        }
     };
 
     const CallOverlay = ({ type, participants, onLeave }) => (
@@ -212,7 +370,9 @@ const Dashboard = () => {
             initial={{ opacity: 0, scale: 0.9 }}
             animate={{ opacity: 1, scale: 1 }}
             exit={{ opacity: 0, scale: 0.9 }}
-            className="absolute top-20 right-8 z-40 w-64 bg-[#08080c]/95 backdrop-blur-md border border-white/10 rounded-2xl p-4 shadow-2xl"
+            className={`absolute top-20 right-8 z-40 bg-[#08080c]/95 backdrop-blur-md border border-white/10 rounded-2xl p-4 shadow-2xl transition-all duration-500
+                ${type === 'video' ? 'w-[400px]' : 'w-64'}
+            `}
         >
             <div className="flex items-center justify-between mb-4">
                 <div className="flex items-center gap-2">
@@ -228,29 +388,81 @@ const Dashboard = () => {
                     <LogOut className="w-4 h-4" />
                 </button>
             </div>
-            <div className="space-y-3">
-                {participants.map((p) => (
-                    <div key={p.id} className="flex items-center gap-3">
-                        <div className="w-8 h-8 rounded-lg bg-white/5 flex items-center justify-center font-bold text-[10px] text-gray-400 border border-white/5">
-                            {p.name.slice(0, 2).toUpperCase()}
-                        </div>
-                        <div className="flex-1 min-w-0">
-                            <div className="text-xs font-bold text-white truncate">{p.name}</div>
-                            <div className="text-[10px] text-gray-500 font-mono tracking-tighter">
-                                {p.id === user.id ? 'STREAMS_ACTIVE' : 'RECEIVING_DATA'}
+
+            <div className={`grid gap-3 ${type === 'video' ? 'grid-cols-2' : 'grid-cols-1'}`}>
+                {participants.map((p) => {
+                    const isMe = p.id === String(user.id).split('-')[0];
+                    return (
+                        <div key={p.id} className="relative group shrink-0">
+                            <div className={`rounded-xl bg-white/5 border border-white/5 overflow-hidden transition-all flex flex-col
+                                ${type === 'video' ? 'aspect-video' : 'p-3 flex-row items-center gap-3'}
+                            `}>
+                                {type === 'video' ? (
+                                    <div className="flex-1 bg-black/40 flex items-center justify-center relative">
+                                        <video
+                                            id={`stream-${p.id}`}
+                                            autoPlay
+                                            playsInline
+                                            muted={isMe}
+                                            className="w-full h-full object-cover"
+                                            ref={el => {
+                                                if (el && isMe) {
+                                                    el.srcObject = localStream.current;
+                                                } else if (el && remoteStreams[p.id]) {
+                                                    el.srcObject = remoteStreams[p.id];
+                                                }
+                                            }}
+                                        />
+                                        <div className="absolute inset-0 flex items-center justify-center bg-black/20 group-hover:bg-transparent transition-all">
+                                            {!isMe && (
+                                                <div className="w-10 h-10 rounded-full bg-white/5 backdrop-blur-md flex items-center justify-center text-xs font-bold text-white/40 ring-1 ring-white/10">
+                                                    {p.name.slice(0, 2).toUpperCase()}
+                                                </div>
+                                            )}
+                                        </div>
+                                        <div className="absolute bottom-2 left-2 px-2 py-0.5 bg-black/60 backdrop-blur-md rounded text-[9px] font-bold text-white/80 border border-white/10">
+                                            {isMe ? 'YOU' : p.name.toUpperCase()}
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <>
+                                        <div className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold text-[10px] border border-white/5
+                                            ${isMe ? 'bg-hanghive-cyan/20 text-hanghive-cyan' : 'bg-white/5 text-gray-400'}
+                                        `}>
+                                            {p.name.slice(0, 2).toUpperCase()}
+                                        </div>
+                                        <div className="flex-1 min-w-0">
+                                            <div className="text-[11px] font-bold text-white truncate">{p.name}</div>
+                                            <div className="text-[9px] text-gray-600 font-mono tracking-tighter uppercase">
+                                                {isMe ? 'SOURCE_ACTIVE' : 'RECEIVING_SIGNAL'}
+                                            </div>
+                                        </div>
+                                        {!isMe && (
+                                            <audio
+                                                autoPlay
+                                                ref={el => {
+                                                    if (el && remoteStreams[p.id]) {
+                                                        el.srcObject = remoteStreams[p.id];
+                                                    }
+                                                }}
+                                            />
+                                        )}
+                                    </>
+                                )}
                             </div>
                         </div>
-                    </div>
-                ))}
+                    );
+                })}
             </div>
-            <div className="mt-4 pt-4 border-t border-white/5 flex gap-2">
-                <div className="flex-1 h-8 rounded-lg bg-white/5 flex items-center justify-center cursor-pointer hover:bg-white/10 transition-all">
-                    <Mic className="w-3.5 h-3.5" />
-                </div>
+
+            <div className="mt-4 pt-4 border-t border-white/5 flex gap-2 justify-center">
+                <button className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center cursor-pointer hover:bg-white/10 transition-all border border-white/5 group">
+                    <Mic className="w-4 h-4 text-gray-500 group-hover:text-white" />
+                </button>
                 {type === 'video' && (
-                    <div className="flex-1 h-8 rounded-lg bg-white/5 flex items-center justify-center cursor-pointer hover:bg-white/10 transition-all">
-                        <Video className="w-3.5 h-3.5" />
-                    </div>
+                    <button className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center cursor-pointer hover:bg-white/10 transition-all border border-white/5 group">
+                        <Video className="w-4 h-4 text-gray-500 group-hover:text-white" />
+                    </button>
                 )}
             </div>
         </motion.div>
@@ -303,8 +515,9 @@ const Dashboard = () => {
                             combined = [...combined, ...userData];
                         }
                         if (systemRes.ok) {
-                            const systemData = await systemRes.json();
-                            combined = [...combined, ...systemData];
+                            // We don't want system nodes in the "Community Nodes" section
+                            // const systemData = await systemRes.json();
+                            // combined = [...combined, ...systemData];
                         }
                         setPublicCommunities(combined);
                     } catch (err) {
@@ -317,22 +530,35 @@ const Dashboard = () => {
             }
         }, [view]);
 
+        // Reset active room when switching communities
+        useEffect(() => {
+            const rooms = communityRooms[activeCommunity] || [
+                { id: 'general', name: 'general-chat', icon: Hash }
+            ];
+            if (rooms.length > 0) {
+                setActiveRoom(rooms[0].id);
+            }
+        }, [activeCommunity]);
+
         const handleJoin = (comm) => {
             const meta = getCommunityMeta(comm.purpose || 'others');
             setCommunities(prev => {
                 if (prev.find(c => c.id === comm.id)) return prev;
                 return [...prev, { ...comm, icon: meta.icon, color: meta.color }];
             });
+            setActiveCommunity(comm.id);
             onClose();
         };
 
         const handleCreate = async () => {
             if (!user || !user.id) return;
             try {
+                const finalName = `${user.username}-${newComm.name}-${newComm.purpose || 'node'}-${newComm.visibility}`.toUpperCase();
+
                 const res = await fetch(`http://${window.location.hostname}:8000/communities/?owner_id=${user.id}`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(newComm)
+                    body: JSON.stringify({ ...newComm, name: finalName })
                 });
                 if (res.ok) {
                     const created = await res.json();
@@ -342,6 +568,12 @@ const Dashboard = () => {
                     setCodeResult(created.access_code);
                     setCreatedComm(created);
                     setView('code_reveal');
+
+                    // Auto-select the new community so when they close/enter, it's there
+                    setActiveCommunity(created.id);
+                    // Ensure active room is reset
+                    const rooms = communityRooms[created.id] || [{ id: 'lobby', name: 'lobby', icon: Hash }];
+                    setActiveRoom(rooms[0].id);
                 }
             } catch (err) {
                 console.error("Node Establishment Failed:", err);
@@ -361,6 +593,9 @@ const Dashboard = () => {
                         if (prev.find(c => String(c.id) === String(comm.id))) return prev;
                         return [...prev, { ...comm, icon: meta.icon, color: meta.color }];
                     });
+                    setActiveCommunity(comm.id);
+                    const rooms = communityRooms[comm.id] || [{ id: 'lobby', name: 'lobby', icon: Hash }];
+                    setActiveRoom(rooms[0].id);
                     onClose();
                 } else {
                     const err = await res.json();
@@ -370,6 +605,42 @@ const Dashboard = () => {
                 setCodeError('Network error. Check connection.');
             } finally {
                 setCodeLoading(false);
+            }
+        };
+
+        const handleInstantPrivateCreate = async () => {
+            if (!user || !user.id) return;
+            // Use a local loading state if needed, or just let it fly. 
+            // For feedback, we might want to show a spinner, but "Instant" implies speed.
+            try {
+                const finalName = `${user.username}-${selectedComm.name}-PRIVATE`.toUpperCase();
+                const instantNode = {
+                    name: finalName,
+                    description: selectedComm.description || "Encrypted private channel.",
+                    purpose: selectedComm.purpose || "personal",
+                    visibility: "private"
+                };
+
+                const res = await fetch(`http://${window.location.hostname}:8000/communities/?owner_id=${user.id}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(instantNode)
+                });
+
+                if (res.ok) {
+                    const created = await res.json();
+                    const meta = getCommunityMeta(created.purpose);
+                    setCommunities(prev => [...prev, { ...created, icon: meta.icon, color: meta.color }]);
+
+                    // Instant Entry & Reset
+                    setActiveCommunity(created.id);
+                    const rooms = communityRooms[created.id] || [{ id: 'lobby', name: 'lobby', icon: Hash }];
+                    setActiveRoom(rooms[0].id);
+
+                    onClose();
+                }
+            } catch (err) {
+                console.error("Instant Create Failed:", err);
             }
         };
 
@@ -450,8 +721,8 @@ const Dashboard = () => {
                                         <Shield className="w-5 h-5 text-hanghive-purple" />
                                     </div>
                                     <div className="text-center">
-                                        <div className="text-xs font-bold text-white">PRIVATE</div>
-                                        <div className="text-[9px] text-gray-500 uppercase font-mono">ACCESS_NODE</div>
+                                        <div className="text-xs font-bold text-white uppercase tracking-tight">Game/Office</div>
+                                        <div className="text-[9px] text-gray-500 uppercase font-mono tracking-widest leading-none mt-1">SECURED_NODE</div>
                                     </div>
                                 </motion.div>
 
@@ -585,14 +856,21 @@ const Dashboard = () => {
                         {view === 'private_options' && (
                             <div className="flex flex-col items-center py-8 text-center max-w-md mx-auto">
                                 <div className="w-16 h-16 rounded-3xl bg-hanghive-purple/20 flex items-center justify-center mb-6 border border-hanghive-purple/30">
-                                    <Shield className="w-8 h-8 text-hanghive-purple" />
+                                    {(() => {
+                                        const meta = getCommunityMeta(selectedComm?.purpose || 'others');
+                                        return <meta.icon className="w-8 h-8 text-hanghive-purple" />;
+                                    })()}
                                 </div>
-                                <h2 className="text-2xl font-bold text-white mb-1">PRIVATE_NODE_ACCESS</h2>
-                                <p className="text-[10px] text-gray-500 mb-8 font-mono uppercase tracking-widest">Select_Access_Protocol</p>
+                                <h2 className="text-2xl font-bold text-white mb-2 uppercase tracking-tight">
+                                    PRIVATE {selectedComm?.purpose?.toUpperCase() || 'NODE'} ARENA
+                                </h2>
+                                <p className="text-[10px] text-gray-500 font-mono uppercase tracking-widest mb-10">
+                                    Select SECURE {selectedComm?.purpose?.toUpperCase() || 'NODE'} Status
+                                </p>
 
                                 <div className="grid grid-cols-2 gap-4 w-full">
                                     <motion.button
-                                        onClick={() => setView('create')}
+                                        onClick={handleInstantPrivateCreate}
                                         whileHover={{ scale: 1.03, y: -3 }}
                                         whileTap={{ scale: 0.97 }}
                                         className="bg-white/5 border border-white/5 rounded-2xl p-6 transition-all cursor-pointer group flex flex-col items-center gap-4 hover:border-hanghive-cyan/40 hover:bg-hanghive-cyan/5"
@@ -601,8 +879,8 @@ const Dashboard = () => {
                                             <Plus className="w-6 h-6 text-hanghive-cyan" />
                                         </div>
                                         <div>
-                                            <div className="text-sm font-bold text-white uppercase">CREATE</div>
-                                            <div className="text-[9px] text-gray-500 uppercase font-mono">NEW_PRIVATE_NODE</div>
+                                            <div className="text-sm font-bold text-white uppercase">CREATE NODE</div>
+                                            <div className="text-[9px] text-gray-500 uppercase font-mono">NEW_{selectedComm?.purpose?.toUpperCase() || 'NODE'}_PROTOCOL</div>
                                         </div>
                                     </motion.button>
 
@@ -616,8 +894,8 @@ const Dashboard = () => {
                                             <Terminal className="w-6 h-6 text-hanghive-purple" />
                                         </div>
                                         <div>
-                                            <div className="text-sm font-bold text-white uppercase">ENTER_CODE</div>
-                                            <div className="text-[9px] text-gray-500 uppercase font-mono">ACCESS_RESTRICTED_NODE</div>
+                                            <div className="text-sm font-bold text-white uppercase">ENTER CODE</div>
+                                            <div className="text-[9px] text-gray-500 uppercase font-mono">JOIN_SECURED_ENVIRONMENT</div>
                                         </div>
                                     </motion.button>
                                 </div>
@@ -691,7 +969,7 @@ const Dashboard = () => {
                                 <p className="text-[10px] text-gray-600 mb-8 font-mono uppercase tracking-widest">Share this code to invite members</p>
 
                                 <div className="w-full bg-white/5 border border-hanghive-cyan/30 rounded-2xl p-6 mb-4">
-                                    <p className="text-[9px] text-gray-500 uppercase font-mono tracking-widest mb-3">ACCESS_CODE</p>
+                                    <p className="text-[9px] text-gray-500 uppercase font-mono tracking-widest mb-3">COMMUNITY CODE</p>
                                     <p className="text-2xl font-black text-hanghive-cyan font-mono tracking-[0.2em] drop-shadow-[0_0_20px_rgba(0,229,255,0.5)]">
                                         {codeResult}
                                     </p>
@@ -851,7 +1129,7 @@ const Dashboard = () => {
                 {communities.map((comm) => (
                     <motion.div
                         key={comm.id}
-                        onClick={() => setActiveCommunity(comm.id)}
+                        onClick={() => handleSwitchCommunity(comm.id)}
                         whileHover={{ scale: 1.1 }}
                         whileTap={{ scale: 0.95 }}
                         className={`relative w-12 h-12 rounded-full flex items-center justify-center cursor-pointer transition-all duration-300 group
@@ -871,13 +1149,25 @@ const Dashboard = () => {
                             )}
                         </AnimatePresence>
 
-                        <comm.icon
-                            className={`w-5 h-5 transition-colors ${comm.id === 'general' ? 'animate-pulse' : ''}`}
-                            style={{
-                                color: activeCommunity === comm.id ? (comm.color || '#00e5ff') : '#666',
-                                filter: activeCommunity === comm.id ? `drop-shadow(0 0 8px ${comm.color || '#00e5ff'}40)` : 'none'
-                            }}
-                        />
+                        {(() => {
+                            const meta = getCommunityMeta(comm.purpose || 'others');
+                            const Icon = meta.icon;
+                            return (
+                                <Icon
+                                    className={`w-5 h-5 transition-colors ${comm.id === 'general' ? 'animate-pulse' : ''}`}
+                                    style={{
+                                        color: activeCommunity === comm.id ? (comm.color || meta.color) : '#666',
+                                        filter: activeCommunity === comm.id ? `drop-shadow(0 0 8px ${comm.color || meta.color}40)` : 'none'
+                                    }}
+                                />
+                            );
+                        })()}
+
+                        {comm.visibility === 'private' && (
+                            <div className="absolute -top-1 -right-1 w-4 h-4 bg-[#0a0a0f] border border-white/10 rounded-full flex items-center justify-center">
+                                <Lock className="w-2.5 h-2.5 text-hanghive-purple" />
+                            </div>
+                        )}
 
                         {/* Tooltip */}
                         <div className="absolute left-16 px-2 py-1 bg-black/90 backdrop-blur-md text-white text-[10px] font-bold rounded opacity-0 group-hover:opacity-100 pointer-events-none transition-all translate-x-[-10px] group-hover:translate-x-0 whitespace-nowrap z-50 border border-white/10">
@@ -996,121 +1286,140 @@ const Dashboard = () => {
                     )}
                 </AnimatePresence>
 
-                {activeCommunity.startsWith('system_') ? (
-                    <div className="flex-1 flex flex-col items-center justify-center p-8 text-center bg-gradient-to-b from-[#0b0b12] to-[#050508]">
-                        <motion.div
-                            initial={{ scale: 0.9, opacity: 0 }}
-                            animate={{ scale: 1, opacity: 1 }}
-                            className="w-24 h-24 rounded-3xl bg-hanghive-purple/20 flex items-center justify-center mb-8 border border-hanghive-purple/30 shadow-[0_0_50px_rgba(213,0,249,0.15)]"
-                        >
-                            <Globe className="w-12 h-12 text-hanghive-purple" />
-                        </motion.div>
-                        <h2 className="text-3xl font-bold text-white mb-2">
-                            {communities.find(c => c.id === activeCommunity)?.name} Collective
-                        </h2>
-                        <p className="text-gray-500 max-w-md mb-8">
-                            This is an official system node hosted on the Hive backend.
-                            Initialize the connection to enter the specialized environment.
-                        </p>
-                        <div className="flex flex-col gap-4 w-full max-w-xs">
-                            <a
-                                href={`http://${window.location.hostname}:8000/system-communities/${activeCommunity.replace('system_', '')}`}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="px-8 py-3 bg-hanghive-purple hover:bg-hanghive-purple/80 text-white rounded-xl font-bold transition-all flex items-center justify-center gap-2 group"
+                {/* Main Content Area */}
+                <div className="flex-1 flex flex-col relative overflow-hidden bg-[#0a0a0f]">
+                    <div className="h-14 border-b border-white/5 flex items-center px-4 justify-between">
+                        <div className="flex items-center gap-2 font-bold text-white">
+                            <span>
+                                {(() => {
+                                    const comm = communities.find(c => c.id === activeCommunity);
+                                    if (!comm) return 'Lounge';
+                                    return String(comm.id).startsWith('system_') ? `${comm.name} Collective` : comm.name;
+                                })()}
+                            </span>
+                            <span className="text-[10px] text-gray-600 font-mono ml-2 opacity-50">
+                                # {currentRooms.find(r => r.id === activeRoom)?.name || 'lobby'}
+                            </span>
+                        </div>
+                        <div className="flex gap-4 items-center">
+                            <button
+                                onClick={handleVoiceClick}
+                                className={`p-2 rounded-xl transition-all ${isVoiceConnected ? 'bg-green-500/20 text-green-400' : 'text-gray-600 hover:text-gray-300'}`}
+                                title="Start Voice Call"
                             >
-                                <Zap className="w-4 h-4" />
-                                Launch System Node
-                                <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
-                            </a>
-                            <div className="text-[10px] font-mono text-gray-700 tracking-[0.2em] uppercase">
-                                Remote_Access_Protocol_v3.4 // READY
-                            </div>
+                                <Mic className="w-5 h-5" />
+                            </button>
+                            <button
+                                onClick={handleVideoClick}
+                                className={`p-2 rounded-xl transition-all ${isVideoConnected ? 'bg-hanghive-cyan/20 text-hanghive-cyan' : 'text-gray-600 hover:text-gray-300'}`}
+                                title="Start Video Stream"
+                            >
+                                <Video className="w-5 h-5" />
+                            </button>
+                            <div className="w-px h-6 bg-white/5 mx-2" />
+                            <Search className="w-5 h-5 text-gray-600 hover:text-gray-300 cursor-pointer" />
+                            <Bell className="w-5 h-5 text-gray-600 hover:text-gray-300 cursor-pointer" />
+                            <Users className="w-5 h-5 text-gray-600 hover:text-gray-300 cursor-pointer" />
                         </div>
                     </div>
-                ) : (
-                    <>
-                        <div className="h-14 border-b border-white/5 flex items-center px-4 justify-between">
-                            <div className="flex items-center gap-2 font-bold text-white">
-                                <Hash className="w-5 h-5 text-gray-600" />
-                                <span>{currentRooms.find(r => r.id === activeRoom)?.name}</span>
-                                <span className="text-[10px] text-gray-600 font-mono ml-2 opacity-50">/ {communities.find(c => c.id === activeCommunity)?.name}</span>
-                            </div>
-                            <div className="flex gap-4">
-                                <Search className="w-5 h-5 text-gray-600 hover:text-gray-300 cursor-pointer" />
-                                <Bell className="w-5 h-5 text-gray-600 hover:text-gray-300 cursor-pointer" />
-                                <Users className="w-5 h-5 text-gray-600 hover:text-gray-300 cursor-pointer" />
-                            </div>
-                        </div>
 
-                        <div className="flex-1 overflow-y-auto p-6 space-y-6">
-                            {messages.length === 0 && (
-                                <div className="flex flex-col items-center justify-center h-full text-center opacity-20">
-                                    <div className="w-16 h-16 rounded-3xl bg-white/10 flex items-center justify-center mb-4">
-                                        <MessageSquare className="w-8 h-8" />
-                                    </div>
-                                    <h3 className="text-xl font-bold">Beginning of history</h3>
-                                    <p className="max-w-xs text-sm mt-2">This is the start of the #{currentRooms.find(r => r.id === activeRoom)?.name} channel.</p>
-                                </div>
-                            )}
-
-                            {messages.map((msg, i) => (
-                                <motion.div
-                                    key={i}
-                                    initial={{ opacity: 0, x: -10 }}
-                                    animate={{ opacity: 1, x: 0 }}
-                                    transition={{ delay: Math.min(i * 0.05, 0.5) }}
-                                    className="flex gap-4 group hover:bg-white/[0.02] -mx-6 px-6 py-1 transition-colors"
+                    {/* Access Code Banner for Private Communities */}
+                    {communities.find(c => c.id === activeCommunity)?.visibility === 'private' && (
+                        <div className="bg-hanghive-purple/10 border-b border-hanghive-purple/20 px-4 py-2 flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                                <Shield className="w-4 h-4 text-hanghive-purple" />
+                                <span className="text-xs font-bold text-hanghive-purple tracking-wider uppercase">Private Access Code</span>
+                            </div>
+                            <div className="flex items-center gap-3">
+                                <span className="font-mono text-xs text-white font-bold tracking-[0.1em]">{communities.find(c => c.id === activeCommunity)?.access_code || 'LOADING...'}</span>
+                                <button
+                                    onClick={() => navigator.clipboard.writeText(communities.find(c => c.id === activeCommunity)?.access_code)}
+                                    className="text-[10px] text-gray-400 hover:text-white underline decoration-dashed underline-offset-2 uppercase"
                                 >
-                                    {msg.type === 'system' ? (
-                                        <div className="flex-1 text-center py-2">
-                                            <span className="text-[10px] font-mono text-hanghive-cyan bg-hanghive-cyan/5 px-2 py-0.5 rounded border border-hanghive-cyan/10">
-                                                SYSTEM: {msg.content}
-                                            </span>
-                                        </div>
-                                    ) : (
-                                        <>
-                                            <div className="w-10 h-10 rounded-xl bg-white/5 flex items-center justify-center font-bold text-gray-500 mt-1">
-                                                {msg.sender === (parseInt(String(user.id).split('-')[0], 16) || 0) ? 'ME' : 'ID'}
-                                            </div>
-                                            <div className="flex-1">
-                                                <div className="flex items-baseline gap-2">
-                                                    <span className="text-sm font-bold text-white hover:underline cursor-pointer">
-                                                        {msg.sender === user?.id ? user?.username : (msg.sender_name || `User #${msg.sender}`)}
-                                                    </span>
-                                                    <span className="text-[10px] text-gray-600 font-mono">TODAY AT {new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                                                </div>
-                                                <div className="text-sm text-gray-300 leading-relaxed mt-0.5">{msg.content}</div>
-                                            </div>
-                                        </>
-                                    )}
-                                </motion.div>
-                            ))}
-                            <div ref={scrollRef} />
-                        </div>
-
-                        <div className="p-4">
-                            <form onSubmit={handleSend} className="bg-[#15151e] rounded-xl border border-white/5 focus-within:border-hanghive-cyan/30 transition-all flex items-center px-4 relative">
-                                <div className="w-6 h-6 rounded-full bg-white/5 flex items-center justify-center mr-3 hover:bg-white/10 cursor-pointer">
-                                    <Plus className="w-4 h-4 text-gray-400" />
-                                </div>
-                                <input
-                                    type="text"
-                                    placeholder={`Message #${currentRooms.find(r => r.id === activeRoom)?.name}`}
-                                    value={inputText}
-                                    onChange={(e) => setInputText(e.target.value)}
-                                    className="flex-1 bg-transparent py-3 text-sm focus:outline-none text-white placeholder:text-gray-600"
-                                />
-                                <button type="submit" className="p-2 text-gray-600 hover:text-hanghive-cyan transition-all">
-                                    <Send className="w-4 h-4" />
+                                    Copy
                                 </button>
-                            </form>
-                            <div className="text-[9px] font-mono text-gray-600 mt-2 ml-1 tracking-wider">
-                                ENCRYPTED_SIGNAL_STREAM_V1.2 // SECURED_BY_HANGHIVE
                             </div>
                         </div>
-                    </>
-                )}
+                    )}
+
+                    <div className="flex-1 overflow-y-auto p-6 space-y-6">
+                        {messages.length === 0 && (
+                            <div className="flex flex-col items-center justify-center h-full text-center opacity-20">
+                                <div className="w-16 h-16 rounded-3xl bg-white/10 flex items-center justify-center mb-4">
+                                    <MessageSquare className="w-8 h-8" />
+                                </div>
+                                <h3 className="text-xl font-bold">Beginning of history</h3>
+                                <p className="max-w-xs text-sm mt-2">This is the start of the #{currentRooms.find(r => r.id === activeRoom)?.name} channel.</p>
+                            </div>
+                        )}
+
+                        {messages.map((msg, i) => (
+                            <motion.div
+                                key={i}
+                                initial={{ opacity: 0, x: -10 }}
+                                animate={{ opacity: 1, x: 0 }}
+                                transition={{ delay: Math.min(i * 0.05, 0.5) }}
+                                className="flex gap-4 group hover:bg-white/[0.02] -mx-6 px-6 py-1 transition-colors"
+                            >
+                                {msg.type === 'system' || msg.type === 'error' ? (
+                                    <div className="flex-1 text-center py-2">
+                                        <span className={`text-[10px] font-mono px-2 py-0.5 rounded border ${msg.type === 'error'
+                                            ? 'text-red-400 bg-red-400/5 border-red-400/10'
+                                            : 'text-hanghive-cyan bg-hanghive-cyan/5 border-hanghive-cyan/10'
+                                            }`}>
+                                            {msg.type.toUpperCase()}: {msg.content}
+                                        </span>
+                                    </div>
+                                ) : msg.content === 'STARTED_VOICE_CALL' || msg.content === 'ENDED_VOICE_CALL' || msg.content === 'STARTED_VIDEO_STREAM' || msg.content === 'ENDED_VIDEO_STREAM' ? (
+                                    <div className="flex-1 text-center py-1">
+                                        <div className={`text-[10px] font-bold uppercase tracking-[0.2em] py-1 px-4 inline-flex items-center gap-2 rounded-lg 
+                                            ${msg.content.startsWith('STARTED') ? 'text-green-400 bg-green-400/5' : 'text-gray-500 bg-white/5'}`}>
+                                            {msg.content.includes('VOICE') ? <Mic className="w-3 h-3" /> : <Video className="w-3 h-3" />}
+                                            {msg.sender_name || 'USER'} {msg.content.replace(/_/g, ' ')}
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <>
+                                        <div className="w-10 h-10 rounded-xl bg-white/5 flex items-center justify-center font-bold text-gray-500 mt-1 ring-1 ring-white/5">
+                                            {String(msg.sender) === String(user?.id).split('-')[0] ? 'ME' : 'ID'}
+                                        </div>
+                                        <div className="flex-1">
+                                            <div className="flex items-baseline gap-2">
+                                                <span className="text-sm font-bold text-white hover:underline cursor-pointer">
+                                                    {String(msg.sender) === String(user?.id).split('-')[0] ? user?.username : (msg.sender_name || `User #${msg.sender}`)}
+                                                </span>
+                                                <span className="text-[10px] text-gray-600 font-mono">TODAY AT {new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                                            </div>
+                                            <div className="text-sm text-gray-300 leading-relaxed mt-0.5">{msg.content}</div>
+                                        </div>
+                                    </>
+                                )}
+                            </motion.div>
+                        ))}
+                        <div ref={scrollRef} />
+                    </div>
+
+                    <div className="p-4">
+                        <form onSubmit={handleSend} className="bg-[#15151e] rounded-xl border border-white/5 focus-within:border-hanghive-cyan/30 transition-all flex items-center px-4 relative">
+                            <div className="w-6 h-6 rounded-full bg-white/5 flex items-center justify-center mr-3 hover:bg-white/10 cursor-pointer">
+                                <Plus className="w-4 h-4 text-gray-400" />
+                            </div>
+                            <input
+                                type="text"
+                                placeholder={`Message #${currentRooms.find(r => r.id === activeRoom)?.name}`}
+                                value={inputText}
+                                onChange={(e) => setInputText(e.target.value)}
+                                className="flex-1 bg-transparent py-3 text-sm focus:outline-none text-white placeholder:text-gray-600"
+                            />
+                            <button type="submit" className="p-2 text-gray-600 hover:text-hanghive-cyan transition-all">
+                                <Send className="w-4 h-4" />
+                            </button>
+                        </form>
+                        <div className="text-[9px] font-mono text-gray-600 mt-2 ml-1 tracking-wider">
+                            ENCRYPTED_SIGNAL_STREAM_V1.2 // SECURED_BY_HANGHIVE
+                        </div>
+                    </div>
+                </div>
             </div>
 
             {/* Members Panel */}
@@ -1138,7 +1447,7 @@ const Dashboard = () => {
                     </div>
                 </div>
             </div>
-        </div>
+        </div >
     );
 };
 
