@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useNavigate } from 'react-router-dom';
 import {
-    Users, Hash, MessageSquare, Mic, Video,
+    Users, Hash, MessageSquare, Mic, Video, MicOff, VideoOff,
     Settings, Search, Bell, Plus, LogOut,
     Send, Terminal, Shield, Zap, Globe, LogIn,
     Palette, Gamepad2, Book, Coffee, Briefcase, Rocket,
@@ -28,6 +28,8 @@ const Dashboard = () => {
     const [isVideoConnected, setIsVideoConnected] = useState(false);
     const [voiceParticipants, setVoiceParticipants] = useState([]);
     const [videoParticipants, setVideoParticipants] = useState([]);
+    const [isMicMuted, setIsMicMuted] = useState(false);
+    const [isCameraOff, setIsCameraOff] = useState(false);
     const scrollRef = useRef(null);
     const localStream = useRef(null);
     const peerConnections = useRef({}); // client_id -> RTCPeerConnection
@@ -213,10 +215,15 @@ const Dashboard = () => {
                     setVoiceParticipants(data.participants);
                     // Participants list changed, check for new users
                     data.participants.forEach(p => {
-                        if (p.id !== clientId && !peerConnections.current[p.id]) {
+                        // Polite Peer: Only the one with the 'smaller' ID initiates the connection
+                        // This prevents 'glare' where both sides try to call each other at once.
+                        if (p.id !== clientId && !peerConnections.current[p.id] && clientId < p.id) {
                             createPeer(p.id, true, 'voice', socket);
                         }
                     });
+                } else if (data.target && data.target !== clientId) {
+                    // Signaling Filtering: Ignore messages not intended for us
+                    return;
                 } else if (data.type === 'offer') {
                     await createPeer(data.sender, false, 'voice', socket, data.offer);
                 } else if (data.type === 'answer') {
@@ -272,10 +279,14 @@ const Dashboard = () => {
                 if (data.type === 'video_participants') {
                     setVideoParticipants(data.participants);
                     data.participants.forEach(p => {
-                        if (p.id !== clientId && !peerConnections.current[p.id]) {
+                        // Polite Peer logic
+                        if (p.id !== clientId && !peerConnections.current[p.id] && clientId < p.id) {
                             createPeer(p.id, true, 'video', socket);
                         }
                     });
+                } else if (data.target && data.target !== clientId) {
+                    // Signaling Filtering
+                    return;
                 } else if (data.type === 'offer') {
                     await createPeer(data.sender, false, 'video', socket, data.offer);
                 } else if (data.type === 'answer') {
@@ -288,6 +299,26 @@ const Dashboard = () => {
             setVideoWs(socket);
         } catch (err) {
             console.error("Failed to start video call:", err);
+        }
+    };
+
+    const toggleMic = () => {
+        if (localStream.current) {
+            const audioTracks = localStream.current.getAudioTracks();
+            audioTracks.forEach(track => {
+                track.enabled = !track.enabled;
+            });
+            setIsMicMuted(!isMicMuted);
+        }
+    };
+
+    const toggleCamera = () => {
+        if (localStream.current) {
+            const videoTracks = localStream.current.getVideoTracks();
+            videoTracks.forEach(track => {
+                track.enabled = !track.enabled;
+            });
+            setIsCameraOff(!isCameraOff);
         }
     };
 
@@ -369,44 +400,57 @@ const Dashboard = () => {
 
     const CallOverlay = ({ type, participants, onLeave }) => (
         <motion.div
-            initial={{ opacity: 0, scale: 0.9 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.9 }}
-            className={`absolute top-20 right-8 z-40 bg-[#08080c]/95 backdrop-blur-md border border-white/10 rounded-2xl p-4 shadow-2xl transition-all duration-500
-                ${type === 'video' ? 'w-[400px]' : 'w-64'}
-            `}
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 20 }}
+            className="absolute inset-0 z-[60] bg-[#0a0a0f] flex flex-col p-6 overflow-hidden"
         >
-            <div className="flex items-center justify-between mb-4">
-                <div className="flex items-center gap-2">
-                    {type === 'voice' ? <Mic className="w-4 h-4 text-green-400" /> : <Video className="w-4 h-4 text-hanghive-cyan" />}
-                    <span className="text-xs font-bold uppercase tracking-widest text-white">
-                        {type === 'voice' ? 'Voice Session' : 'Video Stream'}
-                    </span>
+            {/* Call Header */}
+            <div className="flex items-center justify-between mb-8 pb-4 border-b border-white/5">
+                <div className="flex items-center gap-4">
+                    <div className={`w-12 h-12 rounded-2xl flex items-center justify-center ${type === 'video' ? 'bg-hanghive-cyan/20' : 'bg-green-500/20'}`}>
+                        {type === 'voice' ? <Mic className="w-6 h-6 text-green-400" /> : <Video className="w-6 h-6 text-hanghive-cyan" />}
+                    </div>
+                    <div>
+                        <h2 className="text-xl font-bold text-white tracking-tight uppercase">
+                            {type === 'voice' ? 'Voice Conference' : 'Video Transmission'}
+                        </h2>
+                        <p className="text-[10px] font-mono text-gray-500 uppercase tracking-widest mt-1">
+                            {participants.length} Participant{participants.length !== 1 ? 's' : ''} // Encrypted Node
+                        </p>
+                    </div>
                 </div>
-                <button
-                    onClick={onLeave}
-                    className="p-1 hover:bg-red-500/20 text-gray-500 hover:text-red-400 rounded transition-all"
-                >
-                    <LogOut className="w-4 h-4" />
-                </button>
+                <div className="flex gap-2">
+                    <button
+                        onClick={onLeave}
+                        className="px-6 py-2 bg-red-500/10 hover:bg-red-500 text-red-500 hover:text-white border border-red-500/20 rounded-xl font-bold text-xs transition-all uppercase tracking-widest"
+                    >
+                        Disconnect
+                    </button>
+                </div>
             </div>
 
-            <div className={`grid gap-3 ${type === 'video' ? 'grid-cols-2' : 'grid-cols-1'}`}>
+            {/* Stream Grid */}
+            <div className={`flex-1 grid gap-6 min-h-0 ${participants.length === 1 ? 'grid-cols-1' :
+                    participants.length === 2 ? 'grid-cols-2' :
+                        participants.length <= 4 ? 'grid-cols-2' :
+                            'grid-cols-3'
+                }`}>
                 {participants.map((p) => {
                     const isMe = p.id === String(user.id).split('-')[0];
                     return (
-                        <div key={p.id} className="relative group shrink-0">
-                            <div className={`rounded-xl bg-white/5 border border-white/5 overflow-hidden transition-all flex flex-col
-                                ${type === 'video' ? 'aspect-video' : 'p-3 flex-row items-center gap-3'}
+                        <div key={p.id} className="relative group min-h-0">
+                            <div className={`h-full rounded-3xl bg-white/[0.02] border border-white/5 overflow-hidden transition-all flex flex-col relative
+                                ${type === 'voice' ? 'items-center justify-center p-8' : ''}
                             `}>
                                 {type === 'video' ? (
-                                    <div className="flex-1 bg-black/40 flex items-center justify-center relative">
+                                    <div className="w-full h-full bg-black/40 flex items-center justify-center relative">
                                         <video
                                             id={`stream-${p.id}`}
                                             autoPlay
                                             playsInline
                                             muted={isMe}
-                                            className="w-full h-full object-cover"
+                                            className="w-full h-full object-cover rounded-2xl"
                                             ref={el => {
                                                 if (el && isMe) {
                                                     el.srcObject = localStream.current;
@@ -415,28 +459,39 @@ const Dashboard = () => {
                                                 }
                                             }}
                                         />
-                                        <div className="absolute inset-0 flex items-center justify-center bg-black/20 group-hover:bg-transparent transition-all">
+                                        {/* Overlay Info */}
+                                        <div className="absolute top-4 left-4 flex gap-2">
+                                            <div className="px-3 py-1 bg-black/60 backdrop-blur-md rounded-lg text-[10px] font-black text-white/90 border border-white/10 uppercase tracking-widest">
+                                                {isMe ? 'YOU' : p.name.toUpperCase()}
+                                            </div>
                                             {!isMe && (
-                                                <div className="w-10 h-10 rounded-full bg-white/5 backdrop-blur-md flex items-center justify-center text-xs font-bold text-white/40 ring-1 ring-white/10">
-                                                    {p.name.slice(0, 2).toUpperCase()}
+                                                <div className="px-3 py-1 bg-hanghive-cyan/20 backdrop-blur-md rounded-lg text-[10px] font-black text-hanghive-cyan border border-hanghive-cyan/30 uppercase tracking-widest">
+                                                    Receiving
+                                                </div>
+                                            )}
+                                            {isMe && isMicMuted && (
+                                                <div className="px-3 py-1 bg-red-500/20 backdrop-blur-md rounded-lg text-[10px] font-black text-red-500 border border-red-500/30 uppercase tracking-widest">
+                                                    Muted
                                                 </div>
                                             )}
                                         </div>
-                                        <div className="absolute bottom-2 left-2 px-2 py-0.5 bg-black/60 backdrop-blur-md rounded text-[9px] font-bold text-white/80 border border-white/10">
-                                            {isMe ? 'YOU' : p.name.toUpperCase()}
-                                        </div>
                                     </div>
                                 ) : (
-                                    <>
-                                        <div className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold text-[10px] border border-white/5
-                                            ${isMe ? 'bg-hanghive-cyan/20 text-hanghive-cyan' : 'bg-white/5 text-gray-400'}
+                                    <div className="flex flex-col items-center gap-6">
+                                        <div className={`w-32 h-32 rounded-full flex items-center justify-center text-4xl font-black border-4 ring-8 relative
+                                            ${isMe ? 'bg-hanghive-cyan/10 border-hanghive-cyan/30 ring-hanghive-cyan/5 text-hanghive-cyan' : 'bg-white/5 border-white/10 ring-white/[0.02] text-white/40'}
                                         `}>
                                             {p.name.slice(0, 2).toUpperCase()}
+                                            {isMe && isMicMuted && (
+                                                <div className="absolute -bottom-2 -right-2 w-10 h-10 bg-red-500 rounded-full flex items-center justify-center border-4 border-[#0a0a0f] text-white text-xl">
+                                                    <MicOff className="w-5 h-5" />
+                                                </div>
+                                            )}
                                         </div>
-                                        <div className="flex-1 min-w-0">
-                                            <div className="text-[11px] font-bold text-white truncate">{p.name}</div>
-                                            <div className="text-[9px] text-gray-600 font-mono tracking-tighter uppercase">
-                                                {isMe ? 'SOURCE_ACTIVE' : 'RECEIVING_SIGNAL'}
+                                        <div className="text-center">
+                                            <div className="text-lg font-black text-white uppercase tracking-tight mb-1">{p.name}</div>
+                                            <div className={`text-[10px] font-mono uppercase tracking-[0.3em] font-bold ${isMe ? 'text-hanghive-cyan' : 'text-gray-600'}`}>
+                                                {isMe ? (isMicMuted ? 'Mic Muted' : 'Source Active') : 'Signal Received'}
                                             </div>
                                         </div>
                                         {!isMe && (
@@ -449,23 +504,46 @@ const Dashboard = () => {
                                                 }}
                                             />
                                         )}
-                                    </>
+                                    </div>
                                 )}
+
+                                {/* Decorator for grid look */}
+                                <div className="absolute top-0 right-0 p-4 opacity-10">
+                                    <div className="w-12 h-12 border-t-2 border-r-2 border-white rounded-tr-xl" />
+                                </div>
                             </div>
                         </div>
                     );
                 })}
             </div>
 
-            <div className="mt-4 pt-4 border-t border-white/5 flex gap-2 justify-center">
-                <button className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center cursor-pointer hover:bg-white/10 transition-all border border-white/5 group">
-                    <Mic className="w-4 h-4 text-gray-500 group-hover:text-white" />
+            {/* Call Controls Bar */}
+            <div className="mt-8 pt-6 border-t border-white/5 flex gap-4 justify-center items-center">
+                <button
+                    onClick={toggleMic}
+                    className={`w-14 h-14 rounded-2xl flex items-center justify-center cursor-pointer transition-all border group
+                        ${isMicMuted ? 'bg-red-500/20 border-red-500/30 text-red-500' : 'bg-white/5 border-white/5 text-gray-500 hover:bg-white/10 hover:text-white'}
+                    `}
+                >
+                    {isMicMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
                 </button>
                 {type === 'video' && (
-                    <button className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center cursor-pointer hover:bg-white/10 transition-all border border-white/5 group">
-                        <Video className="w-4 h-4 text-gray-500 group-hover:text-white" />
+                    <button
+                        onClick={toggleCamera}
+                        className={`w-14 h-14 rounded-2xl flex items-center justify-center cursor-pointer transition-all border group
+                            ${isCameraOff ? 'bg-red-500/20 border-red-500/30 text-red-500' : 'bg-white/5 border-white/5 text-gray-500 hover:bg-white/10 hover:text-white'}
+                        `}
+                    >
+                        {isCameraOff ? <VideoOff className="w-5 h-5" /> : <Video className="w-5 h-5" />}
                     </button>
                 )}
+                <div className="w-[1px] h-8 bg-white/10 mx-2" />
+                <button
+                    onClick={onLeave}
+                    className="h-14 px-8 rounded-2xl bg-red-500 text-white flex items-center justify-center cursor-pointer hover:bg-red-600 transition-all shadow-xl shadow-red-500/20 font-black uppercase tracking-widest text-xs"
+                >
+                    Leave Call
+                </button>
             </div>
         </motion.div>
     );
