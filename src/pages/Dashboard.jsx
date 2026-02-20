@@ -8,6 +8,7 @@ import {
     Palette, Gamepad2, Book, Coffee, Briefcase, Rocket,
     ChevronRight, Lock
 } from 'lucide-react';
+import CONFIG from '../config';
 
 const Dashboard = () => {
     const navigate = useNavigate();
@@ -85,7 +86,7 @@ const Dashboard = () => {
             // Fetch communities owned by user
             const fetchUserCommunities = async () => {
                 try {
-                    const res = await fetch(`http://${window.location.hostname}:8000/communities/?owner_id=${parsedUser.id}`);
+                    const res = await fetch(`${CONFIG.API_BASE_URL}/communities/?owner_id=${parsedUser.id}`);
                     if (res.ok) {
                         const data = await res.json();
                         if (data && data.length > 0) {
@@ -196,7 +197,7 @@ const Dashboard = () => {
 
         try {
             localStream.current = await navigator.mediaDevices.getUserMedia({ audio: true });
-            const socket = new WebSocket(`ws://${window.location.host}/ws/voice/${roomKey}/${clientId}?username=${encodeURIComponent(user.username)}`);
+            const socket = new WebSocket(`${CONFIG.WS_BASE_URL}/ws/voice/${roomKey}/${clientId}?username=${encodeURIComponent(user.username)}`);
 
             socket.onopen = () => {
                 setIsVoiceConnected(true);
@@ -256,7 +257,7 @@ const Dashboard = () => {
 
         try {
             localStream.current = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-            const socket = new WebSocket(`ws://${window.location.host}/ws/video/${roomKey}/${clientId}?username=${encodeURIComponent(user.username)}`);
+            const socket = new WebSocket(`${CONFIG.WS_BASE_URL}/ws/video/${roomKey}/${clientId}?username=${encodeURIComponent(user.username)}`);
 
             socket.onopen = () => {
                 setIsVideoConnected(true);

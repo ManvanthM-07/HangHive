@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Mail, Lock, LogIn, UserPlus, ArrowRight, Zap, Users, Shield, Globe, AlertCircle, Loader2, MessageSquare, Mic, Video, Palette, Gamepad2, Book, Coffee, Briefcase, Terminal, Rocket, Hash, Search, Plus } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import TechnicalBackground from '../components/TechnicalBackground';
+import CONFIG from '../config';
 
 // ─── Login Modal ──────────────────────────────────────────────────────────────
 const LoginModal = ({ onClose }) => {
@@ -34,7 +35,7 @@ const LoginModal = ({ onClose }) => {
         setLoading(true);
         setError('');
 
-        const endpoint = isSignup ? '/signup' : '/login';
+        const endpoint = `${CONFIG.API_BASE_URL}${isSignup ? '/signup' : '/login'}`;
 
         try {
             const response = await fetch(endpoint, {
