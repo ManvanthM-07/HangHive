@@ -66,7 +66,11 @@ const LoginModal = ({ onClose }) => {
             localStorage.setItem('hanghive_user', JSON.stringify(data));
             navigate('/dashboard');
         } catch (err) {
-            setError(err.message);
+            if (err.message === 'Failed to fetch') {
+                setError('NETWORK_ERROR: Backend may be starting up (Render Sleep). Please wait 30 seconds and try again.');
+            } else {
+                setError(err.message);
+            }
         } finally {
             setLoading(false);
         }
