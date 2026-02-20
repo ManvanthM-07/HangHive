@@ -59,6 +59,7 @@ const Dashboard = () => {
 
     // Icon & Color Mapping based on Purpose
     const getCommunityMeta = (purpose) => {
+        if (!purpose) purpose = 'others';
         const mapping = {
             'art': { icon: Palette, color: '#ff4081' },
             'gaming': { icon: Gamepad2, color: '#7c4dff' },
@@ -114,7 +115,7 @@ const Dashboard = () => {
                 // We no longer add system communities to the sidebar by default to keep it clean.
                 // They are accessible via the Discovery (Globe) button.
                 try {
-                    const res = await fetch(`http://${window.location.hostname}:8000/system-communities/system-nodes`);
+                    const res = await fetch(`${CONFIG.API_BASE_URL}/system-communities/system-nodes`);
                     if (res.ok) {
                         const data = await res.json();
                         // Store them locally if needed for lookup, but don't clutter sidebar
@@ -141,7 +142,7 @@ const Dashboard = () => {
         const clientId = String(user.id).split('-')[0];
         // Unique room key to prevent cross-community chat leaks and registry collisions
         const roomKey = `${activeCommunity}-${activeRoom}`;
-        const socket = new WebSocket(`ws://${window.location.host}/ws/${roomKey}/${clientId}?username=${encodeURIComponent(user.username)}`);
+        const socket = new WebSocket(`${CONFIG.WS_BASE_URL}/ws/${roomKey}/${clientId}?username=${encodeURIComponent(user.username)}`);
 
         socket.onopen = () => {
             console.log(`Connected to chat: ${roomKey} as ${clientId}`);
@@ -506,8 +507,8 @@ const Dashboard = () => {
                     setLoading(true);
                     try {
                         const [userRes, systemRes] = await Promise.all([
-                            fetch(`http://${window.location.hostname}:8000/communities/?visibility=public`),
-                            fetch(`http://${window.location.hostname}:8000/system-communities/system-nodes`)
+                            fetch(`${CONFIG.API_BASE_URL}/communities/?visibility=public`),
+                            fetch(`${CONFIG.API_BASE_URL}/system-communities/system-nodes`)
                         ]);
 
                         let combined = [];
@@ -556,7 +557,7 @@ const Dashboard = () => {
             try {
                 const finalName = `${user.username}-${newComm.name}-${newComm.purpose || 'node'}-${newComm.visibility}`.toUpperCase();
 
-                const res = await fetch(`http://${window.location.hostname}:8000/communities/?owner_id=${user.id}`, {
+                const res = await fetch(`${CONFIG.API_BASE_URL}/communities/?owner_id=${user.id}`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ ...newComm, name: finalName })
@@ -586,7 +587,7 @@ const Dashboard = () => {
             setCodeError('');
             setCodeLoading(true);
             try {
-                const res = await fetch(`http://${window.location.hostname}:8000/communities/join/${encodeURIComponent(codeInput.trim().toUpperCase())}`);
+                const res = await fetch(`${CONFIG.API_BASE_URL}/communities/join/${encodeURIComponent(codeInput.trim().toUpperCase())}`);
                 if (res.ok) {
                     const comm = await res.json();
                     const meta = getCommunityMeta(comm.purpose || 'others');
@@ -622,7 +623,7 @@ const Dashboard = () => {
                     visibility: "private"
                 };
 
-                const res = await fetch(`http://${window.location.hostname}:8000/communities/?owner_id=${user.id}`, {
+                const res = await fetch(`${CONFIG.API_BASE_URL}/communities/?owner_id=${user.id}`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(instantNode)
