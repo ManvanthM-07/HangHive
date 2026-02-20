@@ -34,6 +34,10 @@ const Dashboard = () => {
     const localStream = useRef(null);
     const peerConnections = useRef({}); // client_id -> RTCPeerConnection
     const [remoteStreams, setRemoteStreams] = useState({}); // client_id -> MediaStream
+    const [audioLevels, setAudioLevels] = useState({}); // client_id -> volume level (0-100)
+    const audioInterval = useRef(null);
+    const audioContext = useRef(null);
+    const analyzers = useRef({}); // client_id -> AnalyserNode
 
     // Dynamic Rooms per community (mock for now, will be dynamic later)
     const communityRooms = {
@@ -174,19 +178,70 @@ const Dashboard = () => {
         };
     }, [activeRoom]);
 
+    const cleanupCall = () => {
+        // Stop all tracks in local stream
+        if (localStream.current) {
+            localStream.current.getTracks().forEach(track => track.stop());
+            localStream.current = null;
+        }
+        // Close all peer connections
+        Object.values(peerConnections.current).forEach(pc => pc.close());
+        peerConnections.current = {};
+        // Clear remote streams
+        setRemoteStreams({});
+        // Reset mic/camera state for next call session
+        setIsMicMuted(false);
+        setIsMicMuted(false);
+        setIsCameraOff(false);
+
+        // Stop all audio analysis
+        if (audioInterval.current) clearInterval(audioInterval.current);
+        Object.values(analyzers.current).forEach(a => a.disconnect());
+        analyzers.current = {};
+        if (audioContext.current) {
+            audioContext.current.close().catch(() => { });
+            audioContext.current = null;
+        }
+        setAudioLevels({});
+    };
+
+    const setupAudioMonitor = (stream, id) => {
+        try {
+            if (!audioContext.current) {
+                audioContext.current = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            const context = audioContext.current;
+            const source = context.createMediaStreamSource(stream);
+            const analyzer = context.createAnalyser();
+            analyzer.fftSize = 256;
+            source.connect(analyzer);
+            analyzers.current[id] = analyzer;
+
+            // Simple loop to update levels
+            if (!audioInterval.current) {
+                audioInterval.current = setInterval(() => {
+                    const newLevels = {};
+                    Object.entries(analyzers.current).forEach(([cid, node]) => {
+                        const dataArray = new Uint8Array(node.frequencyBinCount);
+                        node.getByteFrequencyData(dataArray);
+                        const avg = dataArray.reduce((prev, curr) => prev + curr, 0) / dataArray.length;
+                        newLevels[cid] = Math.min(100, Math.round(avg * 1.5)); // Scale it for better visibility
+                    });
+                    setAudioLevels(prev => ({ ...prev, ...newLevels }));
+                }, 100);
+            }
+        } catch (err) {
+            console.error("Audio monitor setup failed:", err);
+        }
+    };
+
     const handleVoiceClick = async () => {
         if (isVoiceConnected) {
             voiceWs?.close();
             setVoiceWs(null);
             setIsVoiceConnected(false);
             setVoiceParticipants([]);
-            // Cleanup WebRTC
-            if (localStream.current) {
-                localStream.current.getTracks().forEach(track => track.stop());
-                localStream.current = null;
-            }
-            Object.values(peerConnections.current).forEach(pc => pc.close());
-            peerConnections.current = {};
+            cleanupCall();
 
             if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(`ENDED_VOICE_CALL`);
@@ -194,18 +249,35 @@ const Dashboard = () => {
             return;
         }
 
+        // Mutual Exclusivity: Close video if active
+        if (isVideoConnected) {
+            videoWs?.close();
+            setVideoWs(null);
+            setIsVideoConnected(false);
+            setVideoParticipants([]);
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(`ENDED_VIDEO_STREAM`);
+            }
+        }
+
+        // Thorough cleanup before starting new session
+        cleanupCall();
+
         if (!user || !user.id) return;
         const clientId = String(user.id).split('-')[0];
         const roomKey = `${activeCommunity}-${activeRoom}`;
 
         try {
-            localStream.current = await navigator.mediaDevices.getUserMedia({ audio: true });
+            localStream.current = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
             const socket = new WebSocket(`${CONFIG.WS_BASE_URL}/ws/voice/${roomKey}/${clientId}?username=${encodeURIComponent(user.username)}`);
 
             socket.onopen = () => {
                 setIsVoiceConnected(true);
                 if (ws && ws.readyState === WebSocket.OPEN) {
                     ws.send(`STARTED_VOICE_CALL`);
+                }
+                if (localStream.current) {
+                    setupAudioMonitor(localStream.current, clientId);
                 }
             };
 
@@ -245,19 +317,27 @@ const Dashboard = () => {
             setVideoWs(null);
             setIsVideoConnected(false);
             setVideoParticipants([]);
-            // Cleanup WebRTC
-            if (localStream.current) {
-                localStream.current.getTracks().forEach(track => track.stop());
-                localStream.current = null;
-            }
-            Object.values(peerConnections.current).forEach(pc => pc.close());
-            peerConnections.current = {};
+            cleanupCall();
 
             if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(`ENDED_VIDEO_STREAM`);
             }
             return;
         }
+
+        // Mutual Exclusivity: Close voice if active
+        if (isVoiceConnected) {
+            voiceWs?.close();
+            setVoiceWs(null);
+            setIsVoiceConnected(false);
+            setVoiceParticipants([]);
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(`ENDED_VOICE_CALL`);
+            }
+        }
+
+        // Thorough cleanup before starting new session
+        cleanupCall();
 
         if (!user || !user.id) return;
         const clientId = String(user.id).split('-')[0];
@@ -271,6 +351,9 @@ const Dashboard = () => {
                 setIsVideoConnected(true);
                 if (ws && ws.readyState === WebSocket.OPEN) {
                     ws.send(`STARTED_VIDEO_STREAM`);
+                }
+                if (localStream.current) {
+                    setupAudioMonitor(localStream.current, clientId);
                 }
             };
 
@@ -349,11 +432,15 @@ const Dashboard = () => {
         };
 
         pc.ontrack = (event) => {
-            console.log(`Received remote track from ${targetId}`, event.streams[0]);
+            console.log(`Received remote track from ${targetId}:`, event.track.kind);
+            const stream = event.streams[0] || new MediaStream([event.track]);
             setRemoteStreams(prev => ({
                 ...prev,
-                [targetId]: event.streams[0]
+                [targetId]: stream
             }));
+            if (event.track.kind === 'audio') {
+                setupAudioMonitor(stream, targetId);
+            }
         };
 
         pc.oniceconnectionstatechange = () => {
@@ -398,7 +485,7 @@ const Dashboard = () => {
         }
     };
 
-    const CallOverlay = ({ type, participants, onLeave }) => (
+    const CallOverlay = ({ type, participants, onLeave, isMicMuted, isCameraOff, toggleMic, toggleCamera, audioLevels }) => (
         <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
@@ -432,9 +519,9 @@ const Dashboard = () => {
 
             {/* Stream Grid */}
             <div className={`flex-1 grid gap-6 min-h-0 ${participants.length === 1 ? 'grid-cols-1' :
-                    participants.length === 2 ? 'grid-cols-2' :
-                        participants.length <= 4 ? 'grid-cols-2' :
-                            'grid-cols-3'
+                participants.length === 2 ? 'grid-cols-2' :
+                    participants.length <= 4 ? 'grid-cols-2' :
+                        'grid-cols-3'
                 }`}>
                 {participants.map((p) => {
                     const isMe = p.id === String(user.id).split('-')[0];
@@ -452,10 +539,14 @@ const Dashboard = () => {
                                             muted={isMe}
                                             className="w-full h-full object-cover rounded-2xl"
                                             ref={el => {
-                                                if (el && isMe) {
-                                                    el.srcObject = localStream.current;
-                                                } else if (el && remoteStreams[p.id]) {
-                                                    el.srcObject = remoteStreams[p.id];
+                                                if (el) {
+                                                    const stream = isMe ? localStream.current : remoteStreams[p.id];
+                                                    if (el.srcObject !== stream) {
+                                                        el.srcObject = stream;
+                                                    }
+                                                    if (stream) {
+                                                        el.play().catch(e => console.error("Playback failed:", e));
+                                                    }
                                                 }
                                             }}
                                         />
@@ -478,8 +569,9 @@ const Dashboard = () => {
                                     </div>
                                 ) : (
                                     <div className="flex flex-col items-center gap-6">
-                                        <div className={`w-32 h-32 rounded-full flex items-center justify-center text-4xl font-black border-4 ring-8 relative
+                                        <div className={`w-32 h-32 rounded-full flex items-center justify-center text-4xl font-black border-4 ring-8 relative transition-all duration-300
                                             ${isMe ? 'bg-hanghive-cyan/10 border-hanghive-cyan/30 ring-hanghive-cyan/5 text-hanghive-cyan' : 'bg-white/5 border-white/10 ring-white/[0.02] text-white/40'}
+                                            ${(audioLevels[p.id] > 10) ? 'border-green-500 shadow-[0_0_20px_rgba(34,197,94,0.3)] scale-105' : ''}
                                         `}>
                                             {p.name.slice(0, 2).toUpperCase()}
                                             {isMe && isMicMuted && (
@@ -491,15 +583,23 @@ const Dashboard = () => {
                                         <div className="text-center">
                                             <div className="text-lg font-black text-white uppercase tracking-tight mb-1">{p.name}</div>
                                             <div className={`text-[10px] font-mono uppercase tracking-[0.3em] font-bold ${isMe ? 'text-hanghive-cyan' : 'text-gray-600'}`}>
-                                                {isMe ? (isMicMuted ? 'Mic Muted' : 'Source Active') : 'Signal Received'}
+                                                {audioLevels[p.id] > 10 ? (
+                                                    <span className="text-green-400 animate-pulse">● Speaking</span>
+                                                ) : (
+                                                    isMe ? (isMicMuted ? 'Mic Muted' : 'Source Active') : 'Signal Received'
+                                                )}
                                             </div>
                                         </div>
                                         {!isMe && (
                                             <audio
                                                 autoPlay
+                                                playsInline
                                                 ref={el => {
                                                     if (el && remoteStreams[p.id]) {
-                                                        el.srcObject = remoteStreams[p.id];
+                                                        if (el.srcObject !== remoteStreams[p.id]) {
+                                                            el.srcObject = remoteStreams[p.id];
+                                                        }
+                                                        el.play().catch(e => console.error("Audio playback failed:", e));
                                                     }
                                                 }}
                                             />
@@ -1355,6 +1455,9 @@ const Dashboard = () => {
                             type="voice"
                             participants={voiceParticipants}
                             onLeave={handleVoiceClick}
+                            isMicMuted={isMicMuted}
+                            toggleMic={toggleMic}
+                            audioLevels={audioLevels}
                         />
                     )}
                     {isVideoConnected && (
@@ -1362,6 +1465,11 @@ const Dashboard = () => {
                             type="video"
                             participants={videoParticipants}
                             onLeave={handleVideoClick}
+                            isMicMuted={isMicMuted}
+                            isCameraOff={isCameraOff}
+                            toggleMic={toggleMic}
+                            toggleCamera={toggleCamera}
+                            audioLevels={audioLevels}
                         />
                     )}
                 </AnimatePresence>
