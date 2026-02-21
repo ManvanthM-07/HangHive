@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -47,18 +47,19 @@ const Dashboard = () => {
     const audioContext = useRef(null);
     const analyzers = useRef({}); // client_id -> AnalyserNode
 
-    // Dynamic Rooms per community (mock for now, will be dynamic later)
-    const communityRooms = {
+    // Dynamic Rooms per community — useMemo prevents new object creation every render
+    const communityRooms = useMemo(() => ({
         'general': [
             { id: 'lobby', name: 'lounge-lobby', icon: MessageSquare },
             { id: 'news', name: 'hive-broadcast', icon: Zap },
         ],
         // Other communities will fetch rooms from backend
-    };
+    }), []);
 
-    const currentRooms = communityRooms[activeCommunity] || [
-        { id: 'lobby', name: 'lobby', icon: Hash }
-    ];
+    const currentRooms = useMemo(
+        () => communityRooms[activeCommunity] || [{ id: 'lobby', name: 'lobby', icon: Hash }],
+        [communityRooms, activeCommunity]
+    );
 
     const handleSwitchCommunity = (commId) => {
         setActiveCommunity(commId);
@@ -151,30 +152,39 @@ const Dashboard = () => {
         }
     }, [navigate]);
 
-    const currentCommunityObj = communities.find(c => c.id === activeCommunity) || communities[0];
+    const currentCommunityObj = useMemo(
+        () => communities.find(c => c.id === activeCommunity) || communities[0],
+        [communities, activeCommunity]
+    );
     const isArtCommunity = currentCommunityObj?.purpose?.toLowerCase() === 'art';
     const isWorkCommunity = currentCommunityObj?.purpose?.toLowerCase() === 'work';
+    const currentCommunityId = currentCommunityObj?.id;
 
-    const fetchMedia = () => {
-        if ((isArtCommunity || isWorkCommunity) && currentCommunityObj?.id) {
-            fetch(`${CONFIG.API_BASE_URL}/media/${currentCommunityObj.id}`)
-                .then(res => {
-                    if (!res.ok) throw new Error(`Media fetch failed: ${res.status}`);
-                    return res.json();
-                })
-                .then(data => {
-                    setMediaItems(Array.isArray(data) ? data : []);
-                })
-                .catch(err => {
-                    console.warn("Media fetch error (showing empty):", err);
-                    setMediaItems([]);
-                });
-        }
-    };
+    // useCallback gives fetchMedia a stable reference so it doesn't cause
+    // stale closures when called from the WebSocket onmessage handler.
+    const fetchMedia = useCallback(() => {
+        if (!currentCommunityId) return;
+        const purpose = currentCommunityObj?.purpose?.toLowerCase();
+        if (purpose !== 'art' && purpose !== 'work') return;
+        fetch(`${CONFIG.API_BASE_URL}/media/${currentCommunityId}`)
+            .then(res => {
+                if (!res.ok) throw new Error(`Media fetch failed: ${res.status}`);
+                return res.json();
+            })
+            .then(data => {
+                setMediaItems(Array.isArray(data) ? data : []);
+            })
+            .catch(err => {
+                console.warn("Media fetch error (showing empty):", err);
+                setMediaItems([]);
+            });
+    }, [currentCommunityId, currentCommunityObj?.purpose]);
 
+    // Only depend on the stable community ID and mediaTab — not derived booleans
+    // that change on every render, which would cause an infinite fetch loop.
     useEffect(() => {
         fetchMedia();
-    }, [activeCommunity, mediaTab, isArtCommunity, isWorkCommunity]);
+    }, [fetchMedia, mediaTab]);
 
     // Chat WebSocket session
     useEffect(() => {
@@ -196,7 +206,13 @@ const Dashboard = () => {
             try {
                 const data = JSON.parse(event.data);
                 if (data.type === 'room_members') {
-                    setRoomMembers(data.members || []);
+                    // Only update state if the member list actually changed to
+                    // avoid re-rendering the whole dashboard on every 5-second poll.
+                    setRoomMembers(prev => {
+                        const next = data.members || [];
+                        if (JSON.stringify(prev) === JSON.stringify(next)) return prev;
+                        return next;
+                    });
                 } else if (data.type === 'new_media') {
                     console.log("[MEDIA_DEBUG] Real-time media update received:", data);
                     fetchMedia(); // Refresh media items for everyone in the community
