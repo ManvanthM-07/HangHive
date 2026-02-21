@@ -2423,8 +2423,8 @@ const UploadModal = ({ isOpen, onClose, uploadType, onUploadSuccess, currentComm
 
     if (!isOpen) return null;
 
-    const isArt = currentCommunity?.purpose === 'art';
-    const isWork = currentCommunity?.purpose === 'work';
+    const isArt = currentCommunity?.purpose?.toLowerCase() === 'art';
+    const isWork = currentCommunity?.purpose?.toLowerCase() === 'work';
 
     const categories = isArt ? [
         { id: 'video', label: 'Video (Shorts)', icon: Play },
@@ -2470,6 +2470,8 @@ const UploadModal = ({ isOpen, onClose, uploadType, onUploadSuccess, currentComm
 
         try {
             console.log("[UPLOAD_DEBUG] Initiating upload with payload:", payload);
+            console.log("[UPLOAD_DEBUG] Targeting URL:", `${CONFIG.API_BASE_URL}/media/`);
+
             const res = await fetch(`${CONFIG.API_BASE_URL}/media/`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -2485,16 +2487,21 @@ const UploadModal = ({ isOpen, onClose, uploadType, onUploadSuccess, currentComm
                 setTitle('');
                 setUrl('');
             } else {
-                const errorData = await res.json().catch(() => ({}));
+                let errorData;
+                try {
+                    errorData = await res.json();
+                } catch (e) {
+                    errorData = { detail: "Non-JSON response from server" };
+                }
                 console.error("[UPLOAD_DEBUG] Upload failed with status:", res.status, errorData);
                 const detail = typeof errorData.detail === 'string'
                     ? errorData.detail
                     : JSON.stringify(errorData.detail || 'Internal Server Error');
-                alert(`Upload failed: ${res.status} ${detail}`);
+                alert(`Upload failed (Status ${res.status}): ${detail}`);
             }
         } catch (err) {
             console.error("[UPLOAD_DEBUG] Network/Critical error:", err);
-            alert(`A critical error occurred: ${err.message}`);
+            alert(`A critical error occurred: ${err.message}. Please ensure the backend is running at ${CONFIG.API_BASE_URL}`);
         } finally {
             setIsSubmitting(false);
         }
@@ -2516,16 +2523,17 @@ const UploadModal = ({ isOpen, onClose, uploadType, onUploadSuccess, currentComm
 
                 <form onSubmit={handleSubmit} className="space-y-6">
                     <div>
-                        <label className="block text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-2">Media Type</label>
-                        <div className="grid grid-cols-3 gap-2">
-                            {['image', 'video', 'audio'].map((t) => (
+                        <label className="block text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-2">Resource Category</label>
+                        <div className="grid grid-cols-2 gap-2">
+                            {categories.map((cat) => (
                                 <button
-                                    key={t}
+                                    key={cat.id}
                                     type="button"
-                                    onClick={() => setType(t)}
-                                    className={`py-2 rounded-xl text-[10px] font-bold uppercase tracking-widest border transition-all ${type === t ? 'bg-hanghive-cyan/10 border-hanghive-cyan text-hanghive-cyan' : 'bg-white/5 border-white/5 text-gray-500'}`}
+                                    onClick={() => setType(cat.id)}
+                                    className={`py-2 px-3 rounded-xl text-[10px] font-bold uppercase tracking-widest border transition-all text-left flex items-center gap-2 ${type === cat.id ? 'bg-hanghive-cyan/10 border-hanghive-cyan text-hanghive-cyan' : 'bg-white/5 border-white/5 text-gray-500 hover:border-white/10'}`}
                                 >
-                                    {t}
+                                    <cat.icon className="w-3 h-3" />
+                                    <span className="truncate">{cat.label}</span>
                                 </button>
                             ))}
                         </div>
