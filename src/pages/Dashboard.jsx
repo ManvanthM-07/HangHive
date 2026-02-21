@@ -2540,18 +2540,29 @@ const UploadModal = ({ isOpen, onClose, uploadType, onUploadSuccess, currentComm
         }
 
         const ownerId = Number(user?.id);
-        const communityId = Number(currentCommunity?.id);
+        let communityId = Number(currentCommunity?.id);
+
+        // If communityId is NaN it means the community has a legacy string ID
+        // (e.g. "system_art"). Auto-resolve it by fetching the real DB integer ID.
+        if (isNaN(communityId) && currentCommunity?.purpose) {
+            try {
+                const res = await fetch(`${CONFIG.API_BASE_URL}/system-communities/system-nodes`);
+                if (res.ok) {
+                    const nodes = await res.json();
+                    const match = nodes.find(n => n.purpose?.toLowerCase() === currentCommunity.purpose?.toLowerCase());
+                    if (match && Number.isInteger(match.id)) {
+                        communityId = match.id;
+                        console.log(`[UPLOAD_DEBUG] Resolved community ID ${currentCommunity.id} → ${communityId}`);
+                    }
+                }
+            } catch (lookupErr) {
+                console.error("[UPLOAD_DEBUG] Community ID lookup failed:", lookupErr);
+            }
+        }
 
         if (isNaN(ownerId) || isNaN(communityId)) {
             console.error("[UPLOAD_DEBUG] ID conversion failed:", { ownerId: user?.id, communityId: currentCommunity?.id });
-            // This happens when a system community is stored with the old string ID (e.g. "system_art").
-            // The backend API now returns real integer IDs — the user just needs to re-join
-            // the community from the Discovery panel to pick up the new ID.
-            alert(
-                "This community needs to be refreshed.\n\n" +
-                "Please click the 🔍 Discovery button, find this community, and click Join again. " +
-                "This is a one-time step to sync with the updated backend."
-            );
+            alert("Upload failed: could not resolve a valid community ID. Please ensure the backend is online and try again.");
             setIsSubmitting(false);
             return;
         }
