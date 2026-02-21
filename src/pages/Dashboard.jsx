@@ -810,13 +810,34 @@ const Dashboard = () => {
             }
         }, [activeCommunity]);
 
-        const handleJoin = (comm) => {
+        const handleJoin = async (comm) => {
             const meta = getCommunityMeta(comm.purpose || 'others');
+
+            // If this is a frontend-only system node (id like 'system_work'),
+            // resolve the real DB integer ID before storing so uploads work.
+            let resolvedComm = comm;
+            if (typeof comm.id === 'string' && comm.id.startsWith('system_')) {
+                try {
+                    const res = await fetch(`${CONFIG.API_BASE_URL}/system-communities/system-nodes`);
+                    if (res.ok) {
+                        const nodes = await res.json();
+                        const match = nodes.find(n => n.purpose?.toLowerCase() === comm.purpose?.toLowerCase());
+                        if (match && typeof match.id === 'number') {
+                            resolvedComm = { ...comm, id: match.id };
+                            console.log(`[JOIN_DEBUG] Resolved system community '${comm.id}' → DB id ${match.id}`);
+                        }
+                    }
+                } catch (err) {
+                    console.warn('[JOIN_DEBUG] Could not resolve system community ID:', err);
+                    // Fall back to the string ID — upload modal will try to resolve it too
+                }
+            }
+
             setCommunities(prev => {
-                if (prev.find(c => c.id === comm.id)) return prev;
-                return [...prev, { ...comm, icon: meta.icon, color: meta.color }];
+                if (prev.find(c => String(c.id) === String(resolvedComm.id))) return prev;
+                return [...prev, { ...resolvedComm, icon: meta.icon, color: meta.color }];
             });
-            setActiveCommunity(comm.id);
+            setActiveCommunity(resolvedComm.id);
             onClose();
         };
 
@@ -2533,6 +2554,7 @@ const UploadModal = ({ isOpen, onClose, uploadType, onUploadSuccess, currentComm
 
     const handleSubmit = async (e) => {
         e.preventDefault();
+        setIsSubmitting(true);
 
         if (!user?.id || !currentCommunity?.id) {
             alert("Error: Missing user or community identification.");
