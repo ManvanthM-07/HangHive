@@ -6,7 +6,9 @@ import {
     Settings, Search, Bell, Plus, LogOut,
     Send, Terminal, Shield, Zap, Globe, LogIn,
     Palette, Gamepad2, Book, Coffee, Briefcase, Rocket,
-    ChevronRight, Lock
+    ChevronRight, Lock, Play, Music, Image, Heart, Share2, MoreHorizontal,
+    Music2, Layout, Upload, SkipBack, SkipForward, Volume2, List,
+    GraduationCap, Building2, University, School, Library, FileText, Inbox, Package
 } from 'lucide-react';
 import CONFIG from '../config';
 
@@ -28,8 +30,14 @@ const Dashboard = () => {
     const [isVideoConnected, setIsVideoConnected] = useState(false);
     const [voiceParticipants, setVoiceParticipants] = useState([]);
     const [videoParticipants, setVideoParticipants] = useState([]);
+    const [roomMembers, setRoomMembers] = useState([]); // Real-time members in the current chat room
     const [isMicMuted, setIsMicMuted] = useState(false);
     const [isCameraOff, setIsCameraOff] = useState(false);
+    const [mediaTab, setMediaTab] = useState(null); // null = landing grid, 'shorts' | 'exhibition' | 'studio' | 'chat' | 'school' | 'college' | 'office' | 'other'
+    const [subTab, setSubTab] = useState(null); // Used for School sub-categories (teacher/student)
+    const [mediaItems, setMediaItems] = useState([]);
+    const [isUploading, setIsUploading] = useState(false);
+    const [uploadType, setUploadType] = useState('image'); // pre-select type in UploadModal
     const scrollRef = useRef(null);
     const localStream = useRef(null);
     const peerConnections = useRef({}); // client_id -> RTCPeerConnection
@@ -54,6 +62,8 @@ const Dashboard = () => {
 
     const handleSwitchCommunity = (commId) => {
         setActiveCommunity(commId);
+        setMediaTab(null); // Reset Art Dashboard to landing grid when switching communities
+        setSubTab(null); // Reset sub-tabs
         // Default to 'lobby' or first available room, ensuring we never have an undefined activeRoom
         const rooms = communityRooms[commId] || [{ id: 'lobby', name: 'lobby', icon: Hash }];
         if (rooms.length > 0) {
@@ -141,29 +151,76 @@ const Dashboard = () => {
         }
     }, [navigate]);
 
+    const currentCommunityObj = communities.find(c => c.id === activeCommunity) || communities[0];
+    const isArtCommunity = currentCommunityObj?.purpose?.toLowerCase() === 'art';
+    const isWorkCommunity = currentCommunityObj?.purpose?.toLowerCase() === 'work';
+
+    const fetchMedia = () => {
+        if ((isArtCommunity || isWorkCommunity) && currentCommunityObj?.id) {
+            fetch(`${CONFIG.API_BASE_URL}/media/${currentCommunityObj.id}`)
+                .then(res => {
+                    if (!res.ok) throw new Error(`Media fetch failed: ${res.status}`);
+                    return res.json();
+                })
+                .then(data => {
+                    setMediaItems(Array.isArray(data) ? data : []);
+                })
+                .catch(err => {
+                    console.warn("Media fetch error (showing empty):", err);
+                    setMediaItems([]);
+                });
+        }
+    };
+
+    useEffect(() => {
+        fetchMedia();
+    }, [activeCommunity, mediaTab, isArtCommunity, isWorkCommunity]);
+
     // Chat WebSocket session
     useEffect(() => {
         if (!user || !user.id) return;
 
-        const clientId = String(user.id).split('-')[0];
-        // Unique room key to prevent cross-community chat leaks and registry collisions
+        const clientId = parseInt(user.id, 10) || String(user.id).split('-')[0];
         const roomKey = `${activeCommunity}-${activeRoom}`;
+        console.log(`[MEMBERS_DEBUG] Opening WS: room=${roomKey}, clientId=${clientId}, username=${user.username}`);
         const socket = new WebSocket(`${CONFIG.WS_BASE_URL}/ws/${roomKey}/${clientId}?username=${encodeURIComponent(user.username)}`);
 
         socket.onopen = () => {
-            console.log(`Connected to chat: ${roomKey} as ${clientId}`);
+            console.log(`[MEMBERS_DEBUG] Connected: room=${roomKey}, id=${clientId}`);
             setMessages([]);
+            setRoomMembers([]);
+            socket.send(JSON.stringify({ type: 'get_members' }));
         };
 
         socket.onmessage = (event) => {
-            const data = JSON.parse(event.data);
-            setMessages(prev => [...prev, data]);
+            try {
+                const data = JSON.parse(event.data);
+                if (data.type === 'room_members') {
+                    setRoomMembers(data.members || []);
+                } else if (data.type === 'new_media') {
+                    console.log("[MEDIA_DEBUG] Real-time media update received:", data);
+                    fetchMedia(); // Refresh media items for everyone in the community
+                } else {
+                    setMessages(prev => [...prev, data]);
+                }
+            } catch (err) {
+                console.error("[CHAT_DEBUG] Parse error:", err);
+            }
         };
+
+        socket.onerror = (err) => console.error("[CHAT_DEBUG] WS error:", err);
 
         setWs(socket);
 
+        // Poll member list every 5 seconds to stay in sync with other users
+        const memberPoll = setInterval(() => {
+            if (socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify({ type: 'get_members' }));
+            }
+        }, 5000);
+
         return () => {
-            console.log("Cleaning up WebSocket session...");
+            clearInterval(memberPoll);
             socket.close();
         };
     }, [user, activeCommunity, activeRoom]);
@@ -406,16 +463,21 @@ const Dashboard = () => {
     };
 
     const createPeer = async (targetId, initiator, type, socket, offer = null) => {
-        if (peerConnections.current[targetId]) return;
+        // Prevent "flickering" or duplicate connections by checking current state
+        const existing = peerConnections.current[targetId];
+        if (existing && (existing.connectionState === 'connected' || existing.connectionState === 'connecting')) {
+            console.log(`[WEBRTC_DEBUG] Skipping redundant connection to ${targetId}`);
+            return;
+        }
 
         const pc = new RTCPeerConnection({
             iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
         });
-
         peerConnections.current[targetId] = pc;
 
         if (localStream.current) {
             localStream.current.getTracks().forEach(track => {
+                track.enabled = true; // Ensure track is active when adding
                 pc.addTrack(track, localStream.current);
             });
         }
@@ -433,13 +495,23 @@ const Dashboard = () => {
 
         pc.ontrack = (event) => {
             console.log(`Received remote track from ${targetId}:`, event.track.kind);
-            const stream = event.streams[0] || new MediaStream([event.track]);
-            setRemoteStreams(prev => ({
-                ...prev,
-                [targetId]: stream
-            }));
+
+            setRemoteStreams(prev => {
+                const currentStream = prev[targetId] || new MediaStream();
+                if (!currentStream.getTracks().find(t => t.id === event.track.id)) {
+                    currentStream.addTrack(event.track);
+                }
+                return { ...prev, [targetId]: currentStream };
+            });
+
             if (event.track.kind === 'audio') {
-                setupAudioMonitor(stream, targetId);
+                // Ensure audio monitor is set up for the stream
+                setTimeout(() => {
+                    setRemoteStreams(prev => {
+                        if (prev[targetId]) setupAudioMonitor(prev[targetId], targetId);
+                        return prev;
+                    });
+                }, 100);
             }
         };
 
@@ -594,9 +666,11 @@ const Dashboard = () => {
                                             <audio
                                                 autoPlay
                                                 playsInline
+                                                muted={false} // Explicitly unmute remote audio
                                                 ref={el => {
                                                     if (el && remoteStreams[p.id]) {
                                                         if (el.srcObject !== remoteStreams[p.id]) {
+                                                            console.log(`[WEBRTC_DEBUG] Binding audio for ${p.id}`);
                                                             el.srcObject = remoteStreams[p.id];
                                                         }
                                                         el.play().catch(e => console.error("Audio playback failed:", e));
@@ -1476,166 +1550,1021 @@ const Dashboard = () => {
 
                 {/* Main Content Area */}
                 <div className="flex-1 flex flex-col relative overflow-hidden bg-[#0a0a0f]">
-                    <div className="h-14 border-b border-white/5 flex items-center px-4 justify-between">
-                        <div className="flex items-center gap-2 font-bold text-white">
-                            <span>
-                                {(() => {
-                                    const comm = communities.find(c => c.id === activeCommunity);
-                                    if (!comm) return 'Lounge';
-                                    return String(comm.id).startsWith('system_') ? `${comm.name} Collective` : comm.name;
-                                })()}
-                            </span>
-                            <span className="text-[10px] text-gray-600 font-mono ml-2 opacity-50">
-                                # {currentRooms.find(r => r.id === activeRoom)?.name || 'lobby'}
-                            </span>
-                        </div>
-                        <div className="flex gap-4 items-center">
-                            <button
-                                onClick={handleVoiceClick}
-                                className={`p-2 rounded-xl transition-all ${isVoiceConnected ? 'bg-green-500/20 text-green-400' : 'text-gray-600 hover:text-gray-300'}`}
-                                title="Start Voice Call"
-                            >
-                                <Mic className="w-5 h-5" />
-                            </button>
-                            <button
-                                onClick={handleVideoClick}
-                                className={`p-2 rounded-xl transition-all ${isVideoConnected ? 'bg-hanghive-cyan/20 text-hanghive-cyan' : 'text-gray-600 hover:text-gray-300'}`}
-                                title="Start Video Stream"
-                            >
-                                <Video className="w-5 h-5" />
-                            </button>
-                            <div className="w-px h-6 bg-white/5 mx-2" />
-                            <Search className="w-5 h-5 text-gray-600 hover:text-gray-300 cursor-pointer" />
-                            <Bell className="w-5 h-5 text-gray-600 hover:text-gray-300 cursor-pointer" />
-                            <Users className="w-5 h-5 text-gray-600 hover:text-gray-300 cursor-pointer" />
-                        </div>
-                    </div>
-
-                    {/* Access Code Banner for Private Communities */}
-                    {communities.find(c => c.id === activeCommunity)?.visibility === 'private' && (
-                        <div className="bg-hanghive-purple/10 border-b border-hanghive-purple/20 px-4 py-2 flex items-center justify-between">
-                            <div className="flex items-center gap-2">
-                                <Shield className="w-4 h-4 text-hanghive-purple" />
-                                <span className="text-xs font-bold text-hanghive-purple tracking-wider uppercase">Private Access Code</span>
-                            </div>
-                            <div className="flex items-center gap-3">
-                                <span className="font-mono text-xs text-white font-bold tracking-[0.1em]">{communities.find(c => c.id === activeCommunity)?.access_code || 'LOADING...'}</span>
-                                <button
-                                    onClick={() => navigator.clipboard.writeText(communities.find(c => c.id === activeCommunity)?.access_code)}
-                                    className="text-[10px] text-gray-400 hover:text-white underline decoration-dashed underline-offset-2 uppercase"
-                                >
-                                    Copy
-                                </button>
-                            </div>
-                        </div>
-                    )}
-
-                    <div className="flex-1 overflow-y-auto p-6 space-y-6">
-                        {messages.length === 0 && (
-                            <div className="flex flex-col items-center justify-center h-full text-center opacity-20">
-                                <div className="w-16 h-16 rounded-3xl bg-white/10 flex items-center justify-center mb-4">
-                                    <MessageSquare className="w-8 h-8" />
+                    {isArtCommunity ? (
+                        <ArtDashboard
+                            mediaTab={mediaTab}
+                            setMediaTab={setMediaTab}
+                            mediaItems={mediaItems}
+                            onUpload={(type) => { setUploadType(type); setIsUploading(true); }}
+                            messages={messages}
+                            inputText={inputText}
+                            setInputText={setInputText}
+                            handleSend={handleSend}
+                            scrollRef={scrollRef}
+                            user={user}
+                            currentRooms={currentRooms}
+                            activeRoom={activeRoom}
+                        />
+                    ) : isWorkCommunity ? (
+                        <WorkDashboard
+                            mediaTab={mediaTab}
+                            setMediaTab={setMediaTab}
+                            subTab={subTab}
+                            setSubTab={setSubTab}
+                            mediaItems={mediaItems}
+                            onUpload={(type) => { setUploadType(type); setIsUploading(true); }}
+                            messages={messages}
+                            inputText={inputText}
+                            setInputText={setInputText}
+                            handleSend={handleSend}
+                            scrollRef={scrollRef}
+                            user={user}
+                            currentRooms={currentRooms}
+                            activeRoom={activeRoom}
+                        />
+                    ) : (
+                        <>
+                            <div className="h-14 border-b border-white/5 flex items-center px-4 justify-between">
+                                <div className="flex items-center gap-2 font-bold text-white">
+                                    <span>
+                                        {(() => {
+                                            const comm = communities.find(c => c.id === activeCommunity);
+                                            if (!comm) return 'Lounge';
+                                            return String(comm.id).startsWith('system_') ? `${comm.name} Collective` : comm.name;
+                                        })()}
+                                    </span>
+                                    <span className="text-[10px] text-gray-600 font-mono ml-2 opacity-50">
+                                        # {currentRooms.find(r => r.id === activeRoom)?.name || 'lobby'}
+                                    </span>
                                 </div>
-                                <h3 className="text-xl font-bold">Beginning of history</h3>
-                                <p className="max-w-xs text-sm mt-2">This is the start of the #{currentRooms.find(r => r.id === activeRoom)?.name} channel.</p>
+                                <div className="flex gap-4 items-center">
+                                    <button
+                                        onClick={handleVoiceClick}
+                                        className={`p-2 rounded-xl transition-all ${isVoiceConnected ? 'bg-green-500/20 text-green-400' : 'text-gray-600 hover:text-gray-300'}`}
+                                        title="Start Voice Call"
+                                    >
+                                        <Mic className="w-5 h-5" />
+                                    </button>
+                                    <button
+                                        onClick={handleVideoClick}
+                                        className={`p-2 rounded-xl transition-all ${isVideoConnected ? 'bg-hanghive-cyan/20 text-hanghive-cyan' : 'text-gray-600 hover:text-gray-300'}`}
+                                        title="Start Video Stream"
+                                    >
+                                        <Video className="w-5 h-5" />
+                                    </button>
+                                    <div className="w-px h-6 bg-white/5 mx-2" />
+                                    <Search className="w-5 h-5 text-gray-600 hover:text-gray-300 cursor-pointer" />
+                                    <Bell className="w-5 h-5 text-gray-600 hover:text-gray-300 cursor-pointer" />
+                                    <Users className="w-5 h-5 text-gray-600 hover:text-gray-300 cursor-pointer" />
+                                </div>
                             </div>
-                        )}
 
-                        {messages.map((msg, i) => (
-                            <motion.div
-                                key={i}
-                                initial={{ opacity: 0, x: -10 }}
-                                animate={{ opacity: 1, x: 0 }}
-                                transition={{ delay: Math.min(i * 0.05, 0.5) }}
-                                className="flex gap-4 group hover:bg-white/[0.02] -mx-6 px-6 py-1 transition-colors"
-                            >
-                                {msg.type === 'system' || msg.type === 'error' ? (
-                                    <div className="flex-1 text-center py-2">
-                                        <span className={`text-[10px] font-mono px-2 py-0.5 rounded border ${msg.type === 'error'
-                                            ? 'text-red-400 bg-red-400/5 border-red-400/10'
-                                            : 'text-hanghive-cyan bg-hanghive-cyan/5 border-hanghive-cyan/10'
-                                            }`}>
-                                            {msg.type.toUpperCase()}: {msg.content}
-                                        </span>
+                            {/* Access Code Banner for Private Communities */}
+                            {communities.find(c => c.id === activeCommunity)?.visibility === 'private' && (
+                                <div className="bg-hanghive-purple/10 border-b border-hanghive-purple/20 px-4 py-2 flex items-center justify-between">
+                                    <div className="flex items-center gap-2">
+                                        <Shield className="w-4 h-4 text-hanghive-purple" />
+                                        <span className="text-xs font-bold text-hanghive-purple tracking-wider uppercase">Private Access Code</span>
                                     </div>
-                                ) : msg.content === 'STARTED_VOICE_CALL' || msg.content === 'ENDED_VOICE_CALL' || msg.content === 'STARTED_VIDEO_STREAM' || msg.content === 'ENDED_VIDEO_STREAM' ? (
-                                    <div className="flex-1 text-center py-1">
-                                        <div className={`text-[10px] font-bold uppercase tracking-[0.2em] py-1 px-4 inline-flex items-center gap-2 rounded-lg 
-                                            ${msg.content.startsWith('STARTED') ? 'text-green-400 bg-green-400/5' : 'text-gray-500 bg-white/5'}`}>
-                                            {msg.content.includes('VOICE') ? <Mic className="w-3 h-3" /> : <Video className="w-3 h-3" />}
-                                            {msg.sender_name || 'USER'} {msg.content.replace(/_/g, ' ')}
-                                        </div>
+                                    <div className="flex items-center gap-3">
+                                        <span className="font-mono text-xs text-white font-bold tracking-[0.1em]">{communities.find(c => c.id === activeCommunity)?.access_code || 'LOADING...'}</span>
+                                        <button
+                                            onClick={() => navigator.clipboard.writeText(communities.find(c => c.id === activeCommunity)?.access_code)}
+                                            className="text-[10px] text-gray-400 hover:text-white underline decoration-dashed underline-offset-2 uppercase"
+                                        >
+                                            Copy
+                                        </button>
                                     </div>
-                                ) : (
-                                    <>
-                                        <div className="w-10 h-10 rounded-xl bg-white/5 flex items-center justify-center font-bold text-gray-500 mt-1 ring-1 ring-white/5">
-                                            {String(msg.sender) === String(user?.id).split('-')[0] ? 'ME' : 'ID'}
+                                </div>
+                            )}
+
+                            <div className="flex-1 overflow-y-auto p-6 space-y-6">
+                                {messages.length === 0 && (
+                                    <div className="flex flex-col items-center justify-center h-full text-center opacity-20">
+                                        <div className="w-16 h-16 rounded-3xl bg-white/10 flex items-center justify-center mb-4">
+                                            <MessageSquare className="w-8 h-8" />
                                         </div>
-                                        <div className="flex-1">
-                                            <div className="flex items-baseline gap-2">
-                                                <span className="text-sm font-bold text-white hover:underline cursor-pointer">
-                                                    {String(msg.sender) === String(user?.id).split('-')[0] ? user?.username : (msg.sender_name || `User #${msg.sender}`)}
-                                                </span>
-                                                <span className="text-[10px] text-gray-600 font-mono">TODAY AT {new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                                            </div>
-                                            <div className="text-sm text-gray-300 leading-relaxed mt-0.5">{msg.content}</div>
-                                        </div>
-                                    </>
+                                        <h3 className="text-xl font-bold">Beginning of history</h3>
+                                        <p className="max-w-xs text-sm mt-2">This is the start of the #{currentRooms.find(r => r.id === activeRoom)?.name} channel.</p>
+                                    </div>
                                 )}
-                            </motion.div>
-                        ))}
-                        <div ref={scrollRef} />
-                    </div>
 
-                    <div className="p-4">
-                        <form onSubmit={handleSend} className="bg-[#15151e] rounded-xl border border-white/5 focus-within:border-hanghive-cyan/30 transition-all flex items-center px-4 relative">
-                            <div className="w-6 h-6 rounded-full bg-white/5 flex items-center justify-center mr-3 hover:bg-white/10 cursor-pointer">
-                                <Plus className="w-4 h-4 text-gray-400" />
+                                {messages.map((msg, i) => (
+                                    <motion.div
+                                        key={i}
+                                        initial={{ opacity: 0, x: -10 }}
+                                        animate={{ opacity: 1, x: 0 }}
+                                        transition={{ delay: Math.min(i * 0.05, 0.5) }}
+                                        className="flex gap-4 group hover:bg-white/[0.02] -mx-6 px-6 py-1 transition-colors"
+                                    >
+                                        {msg.type === 'system' || msg.type === 'error' ? (
+                                            <div className="flex-1 text-center py-2">
+                                                <span className={`text-[10px] font-mono px-2 py-0.5 rounded border ${msg.type === 'error'
+                                                    ? 'text-red-400 bg-red-400/5 border-red-400/10'
+                                                    : 'text-hanghive-cyan bg-hanghive-cyan/5 border-hanghive-cyan/10'
+                                                    }`}>
+                                                    {msg.type.toUpperCase()}: {msg.content}
+                                                </span>
+                                            </div>
+                                        ) : msg.content === 'STARTED_VOICE_CALL' || msg.content === 'ENDED_VOICE_CALL' || msg.content === 'STARTED_VIDEO_STREAM' || msg.content === 'ENDED_VIDEO_STREAM' ? (
+                                            <div className="flex-1 text-center py-1">
+                                                <div className={`text-[10px] font-bold uppercase tracking-[0.2em] py-1 px-4 inline-flex items-center gap-2 rounded-lg 
+                                                    ${msg.content.startsWith('STARTED') ? 'text-green-400 bg-green-400/5' : 'text-gray-500 bg-white/5'}`}>
+                                                    {msg.content.includes('VOICE') ? <Mic className="w-3 h-3" /> : <Video className="w-3 h-3" />}
+                                                    {msg.sender_name || 'USER'} {msg.content.replace(/_/g, ' ')}
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            <>
+                                                <div className="w-10 h-10 rounded-xl bg-white/5 flex items-center justify-center font-bold text-gray-500 mt-1 ring-1 ring-white/5">
+                                                    {String(msg.sender) === String(user?.id).split('-')[0] ? 'ME' : 'ID'}
+                                                </div>
+                                                <div className="flex-1">
+                                                    <div className="flex items-baseline gap-2">
+                                                        <span className="text-sm font-bold text-white hover:underline cursor-pointer">
+                                                            {String(msg.sender) === String(user?.id).split('-')[0] ? user?.username : (msg.sender_name || `User #${msg.sender}`)}
+                                                        </span>
+                                                        <span className="text-[10px] text-gray-600 font-mono">TODAY AT {new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                                                    </div>
+                                                    <div className="text-sm text-gray-300 leading-relaxed mt-0.5">{msg.content}</div>
+                                                </div>
+                                            </>
+                                        )}
+                                    </motion.div>
+                                ))}
+                                <div ref={scrollRef} />
                             </div>
-                            <input
-                                type="text"
-                                placeholder={`Message #${currentRooms.find(r => r.id === activeRoom)?.name}`}
-                                value={inputText}
-                                onChange={(e) => setInputText(e.target.value)}
-                                className="flex-1 bg-transparent py-3 text-sm focus:outline-none text-white placeholder:text-gray-600"
-                            />
-                            <button type="submit" className="p-2 text-gray-600 hover:text-hanghive-cyan transition-all">
-                                <Send className="w-4 h-4" />
-                            </button>
-                        </form>
-                        <div className="text-[9px] font-mono text-gray-600 mt-2 ml-1 tracking-wider">
-                            ENCRYPTED_SIGNAL_STREAM_V1.2 // SECURED_BY_HANGHIVE
-                        </div>
-                    </div>
+
+                            <div className="p-4">
+                                <form onSubmit={handleSend} className="bg-[#15151e] rounded-xl border border-white/5 focus-within:border-hanghive-cyan/30 transition-all flex items-center px-4 relative">
+                                    <div className="w-6 h-6 rounded-full bg-white/5 flex items-center justify-center mr-3 hover:bg-white/10 cursor-pointer">
+                                        <Plus className="w-4 h-4 text-gray-400" />
+                                    </div>
+                                    <input
+                                        type="text"
+                                        placeholder={`Message #${currentRooms.find(r => r.id === activeRoom)?.name}`}
+                                        value={inputText}
+                                        onChange={(e) => setInputText(e.target.value)}
+                                        className="flex-1 bg-transparent py-3 text-sm focus:outline-none text-white placeholder:text-gray-600"
+                                    />
+                                    <button type="submit" className="p-2 text-gray-600 hover:text-hanghive-cyan transition-all">
+                                        <Send className="w-4 h-4" />
+                                    </button>
+                                </form>
+                            </div>
+                        </>
+                    )}
                 </div>
             </div>
+
+            {/* Upload Modal for Art Communities */}
+            <UploadModal
+                isOpen={isUploading}
+                onClose={() => setIsUploading(false)}
+                uploadType={uploadType}
+                onUploadSuccess={(type) => {
+                    fetchMedia();
+                    // Auto-navigate to the relevant tab
+                    if (type === 'video') setMediaTab('shorts');
+                    else if (type === 'image') setMediaTab('exhibition');
+                    else if (type === 'audio') setMediaTab('studio');
+                    else if (['school', 'college', 'office', 'other'].includes(type)) setMediaTab(type);
+                }}
+                currentCommunity={currentCommunityObj}
+                user={user}
+            />
 
             {/* Members Panel */}
             <div className="w-60 bg-[#08080c] border-l border-white/5 hidden lg:flex flex-col">
                 <div className="h-14 border-b border-white/5 flex items-center px-4 font-bold text-gray-500 text-xs uppercase tracking-widest">
-                    Members — 1
+                    Members — {roomMembers.length}
                 </div>
                 <div className="p-3 space-y-4">
                     <div>
-                        <div className="text-[10px] font-bold text-gray-600 uppercase tracking-widest px-2 mb-2">Online — 1</div>
-                        <div className="flex items-center gap-3 px-2 py-1.5 rounded-md hover:bg-white/5 cursor-pointer opacity-100 group">
-                            <div className="relative">
-                                <div className="w-8 h-8 rounded-xl bg-hanghive-cyan/20 flex items-center justify-center font-bold text-hanghive-cyan text-xs">
-                                    {user.username.slice(0, 2).toUpperCase()}
-                                </div>
-                                <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 bg-[#08080c] rounded-full flex items-center justify-center">
-                                    <div className="w-2 h-2 bg-[#76ff03] rounded-full" />
-                                </div>
-                            </div>
-                            <div className="flex-1 min-w-0">
-                                <div className="text-sm font-bold text-white truncate">{user.username}</div>
-                                <div className="text-[10px] text-gray-500 truncate">Listening to hive...</div>
-                            </div>
+                        <div className="text-[10px] font-bold text-gray-600 uppercase tracking-widest px-2 mb-2">Online — {roomMembers.length}</div>
+                        <div className="space-y-1">
+                            {roomMembers.map((member) => {
+                                const isMe = String(member.id) === String(user?.id).split('-')[0];
+                                return (
+                                    <div key={member.id} className="flex items-center gap-3 px-2 py-1.5 rounded-md hover:bg-white/5 cursor-pointer opacity-100 group">
+                                        <div className="relative">
+                                            <div className="w-8 h-8 rounded-xl bg-hanghive-cyan/20 flex items-center justify-center font-bold text-hanghive-cyan text-xs">
+                                                {member.name.slice(0, 2).toUpperCase()}
+                                            </div>
+                                            <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 bg-[#08080c] rounded-full flex items-center justify-center">
+                                                <div className="w-2 h-2 bg-[#76ff03] rounded-full" />
+                                            </div>
+                                        </div>
+                                        <div className="flex-1 min-w-0">
+                                            <div className="text-sm font-bold text-white truncate">
+                                                {member.name}
+                                                {isMe && <span className="ml-1 text-[10px] text-gray-500">(You)</span>}
+                                            </div>
+                                            <div className="text-[10px] text-gray-500 truncate">Listening to hive...</div>
+                                        </div>
+                                    </div>
+                                );
+                            })}
                         </div>
                     </div>
                 </div>
             </div>
         </div >
+    );
+};
+
+// ─── Art Community Multimedia Components ──────────────────────────
+
+const ART_TABS = [
+    { id: 'shorts', label: 'Shorts', icon: Play, mediaType: 'video', desc: 'Share vertical video clips', color: 'from-red-500/20 to-red-900/10', border: 'border-red-500/20', accent: 'text-red-400' },
+    { id: 'exhibition', label: 'Exhibition', icon: Layout, mediaType: 'image', desc: 'Showcase your artwork & photos', color: 'from-violet-500/20 to-violet-900/10', border: 'border-violet-500/20', accent: 'text-violet-400' },
+    { id: 'studio', label: 'Studio', icon: Music2, mediaType: 'audio', desc: 'Upload & play music tracks', color: 'from-green-500/20 to-green-900/10', border: 'border-green-500/20', accent: 'text-green-400' },
+    { id: 'chat', label: 'Chat', icon: MessageSquare, mediaType: null, desc: 'Talk with the art community', color: 'from-hanghive-cyan/20 to-hanghive-cyan/5', border: 'border-hanghive-cyan/20', accent: 'text-hanghive-cyan' },
+];
+
+const WORK_TABS = [
+    { id: 'school', label: 'School', icon: GraduationCap, mediaType: 'school', desc: 'Educational projects & material', color: 'from-blue-500/20 to-blue-900/10', border: 'border-blue-500/20', accent: 'text-blue-400' },
+    { id: 'college', label: 'College', icon: University, mediaType: 'college', desc: 'Academic study & research', color: 'from-indigo-500/20 to-indigo-900/10', border: 'border-indigo-500/20', accent: 'text-indigo-400' },
+    { id: 'office', label: 'Office', icon: Building2, mediaType: 'office', desc: 'Professional tools & collabs', color: 'from-emerald-500/20 to-emerald-900/10', border: 'border-emerald-500/20', accent: 'text-emerald-400' },
+    { id: 'other', label: 'Other', icon: Package, mediaType: 'other', desc: 'Miscellaneous work resources', color: 'from-amber-500/20 to-amber-900/10', border: 'border-amber-500/20', accent: 'text-amber-400' },
+    { id: 'chat', label: 'Chat', icon: MessageSquare, mediaType: null, desc: 'Professional communication', color: 'from-hanghive-cyan/20 to-hanghive-cyan/5', border: 'border-hanghive-cyan/20', accent: 'text-hanghive-cyan' },
+];
+
+const ArtDashboard = ({ mediaTab, setMediaTab, mediaItems = [], onUpload,
+    messages = [], inputText, setInputText, handleSend, scrollRef, user, currentRooms = [], activeRoom }) => {
+
+    const activeSection = ART_TABS.find(t => t.id === mediaTab);
+
+    // ── Landing grid (no section selected) ────────────────────────
+    const Landing = () => (
+        <div className="flex-1 flex flex-col items-center justify-center p-8 bg-[#050508] min-h-0 overflow-y-auto">
+            <div className="mb-10 text-center">
+                <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-hanghive-cyan/10 border border-hanghive-cyan/20 text-hanghive-cyan text-[10px] font-black uppercase tracking-widest mb-4">
+                    <Palette className="w-3 h-3" /> Art Community
+                </div>
+                <h1 className="text-4xl font-black text-white tracking-tighter mb-2">Create & Explore</h1>
+                <p className="text-sm text-gray-500">Choose a space to express yourself</p>
+            </div>
+
+            <div className="grid grid-cols-2 gap-5 w-full max-w-2xl">
+                {ART_TABS.map(({ id, label, icon: Icon, mediaType, desc, color, border, accent }) => {
+                    const count = mediaType ? mediaItems.filter(i => i.type === mediaType).length : messages.length;
+                    return (
+                        <motion.div
+                            key={id}
+                            whileHover={{ scale: 1.03, y: -4 }}
+                            whileTap={{ scale: 0.98 }}
+                            onClick={() => setMediaTab(id)}
+                            className={`relative flex flex-col gap-4 p-6 rounded-3xl bg-gradient-to-br ${color} border ${border} cursor-pointer group overflow-hidden`}
+                        >
+                            <div className={`absolute -top-8 -right-8 w-32 h-32 rounded-full bg-gradient-to-br ${color} opacity-30 blur-2xl pointer-events-none`} />
+
+                            <div className={`w-14 h-14 rounded-2xl bg-white/5 border ${border} flex items-center justify-center`}>
+                                <Icon className={`w-7 h-7 ${accent}`} />
+                            </div>
+
+                            <div>
+                                <div className="text-lg font-black text-white tracking-tight">{label}</div>
+                                <div className="text-xs text-gray-500 mt-1">{desc}</div>
+                            </div>
+
+                            <div className="flex items-center justify-between mt-auto">
+                                <span className={`text-[10px] font-bold ${accent} opacity-70`}>
+                                    {count} {mediaType ? (mediaType === 'audio' ? 'tracks' : mediaType === 'image' ? 'posts' : 'clips') : 'messages'}
+                                </span>
+                                {mediaType && (
+                                    <button
+                                        onClick={(e) => { e.stopPropagation(); onUpload(mediaType); }}
+                                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/5 border ${border} hover:bg-white/10 text-[10px] font-black uppercase tracking-widest text-white transition-all`}
+                                    >
+                                        <Upload className="w-3 h-3" /> Create
+                                    </button>
+                                )}
+                            </div>
+                        </motion.div>
+                    );
+                })}
+            </div>
+        </div>
+    );
+
+    // ── Section view (after clicking a card) ──────────────────────
+    if (!activeSection) return <Landing />;
+
+    return (
+        <div className="flex-1 flex flex-col min-h-0 bg-[#050508]">
+            {/* Section Header */}
+            <div className={`border-b ${activeSection.border} bg-[#08080c]/70 backdrop-blur-md px-6 py-3 flex items-center justify-between`}>
+                <div className="flex items-center gap-3">
+                    <button
+                        onClick={() => setMediaTab(null)}
+                        className="w-8 h-8 rounded-xl bg-white/5 hover:bg-white/10 flex items-center justify-center text-gray-400 hover:text-white transition-all"
+                    >
+                        <ChevronRight className="w-4 h-4 rotate-180" />
+                    </button>
+                    <activeSection.icon className={`w-5 h-5 ${activeSection.accent}`} />
+                    <span className="text-sm font-black text-white uppercase tracking-wider">{activeSection.label}</span>
+                </div>
+                {activeSection.mediaType && (
+                    <button
+                        onClick={() => onUpload(activeSection.mediaType)}
+                        className={`flex items-center gap-2 px-4 py-2 rounded-xl bg-white/5 border ${activeSection.border} hover:bg-white/10 ${activeSection.accent} text-[10px] font-black uppercase tracking-widest transition-all`}
+                    >
+                        <Upload className="w-3.5 h-3.5" /> Add {activeSection.label}
+                    </button>
+                )}
+            </div>
+
+            {/* Content */}
+            <div className="flex-1 overflow-hidden relative">
+                {mediaTab === 'shorts' && <ShortsFeed items={mediaItems.filter(i => i.type === 'video')} />}
+                {mediaTab === 'exhibition' && <ExhibitionGrid items={mediaItems.filter(i => i.type === 'image')} />}
+                {mediaTab === 'studio' && <StudioPlayer items={mediaItems.filter(i => i.type === 'audio')} />}
+
+                {mediaTab === 'chat' && (
+                    <div className="flex flex-col h-full">
+                        <div className="flex-1 overflow-y-auto p-6 space-y-4">
+                            {messages.length === 0 && (
+                                <div className="flex flex-col items-center justify-center h-full text-center opacity-20">
+                                    <MessageSquare className="w-12 h-12 mb-3" />
+                                    <h3 className="text-lg font-bold">No messages yet</h3>
+                                    <p className="text-xs mt-1">Say something to the art community...</p>
+                                </div>
+                            )}
+                            {messages.map((msg, i) => (
+                                <div key={i} className="flex gap-4 group hover:bg-white/[0.02] rounded-xl px-4 py-1 -mx-4 transition-colors">
+                                    {msg.type === 'system' || msg.type === 'error' ? (
+                                        <div className="flex-1 text-center py-1">
+                                            <span className="text-[10px] font-mono px-2 py-0.5 rounded border text-hanghive-cyan bg-hanghive-cyan/5 border-hanghive-cyan/10">{msg.content}</span>
+                                        </div>
+                                    ) : (
+                                        <>
+                                            <div className="w-9 h-9 rounded-xl bg-white/5 flex items-center justify-center font-bold text-gray-500 mt-1 ring-1 ring-white/5 flex-shrink-0">
+                                                {String(msg.sender) === String(user?.id).split('-')[0] ? 'ME' : 'A'}
+                                            </div>
+                                            <div className="flex-1">
+                                                <div className="flex items-baseline gap-2">
+                                                    <span className="text-sm font-bold text-white">
+                                                        {String(msg.sender) === String(user?.id).split('-')[0] ? user?.username : (msg.sender_name || `User #${msg.sender}`)}
+                                                    </span>
+                                                    <span className="text-[10px] text-gray-600 font-mono">
+                                                        {new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                                    </span>
+                                                </div>
+                                                <div className="text-sm text-gray-300 leading-relaxed mt-0.5">{msg.content}</div>
+                                            </div>
+                                        </>
+                                    )}
+                                </div>
+                            ))}
+                            <div ref={scrollRef} />
+                        </div>
+                        <div className="p-4">
+                            <form onSubmit={handleSend} className="bg-[#15151e] rounded-xl border border-white/5 focus-within:border-hanghive-cyan/30 transition-all flex items-center px-4">
+                                <div className="w-6 h-6 rounded-full bg-white/5 flex items-center justify-center mr-3 hover:bg-white/10 cursor-pointer">
+                                    <Plus className="w-4 h-4 text-gray-400" />
+                                </div>
+                                <input
+                                    type="text"
+                                    placeholder={`Message #${currentRooms.find(r => r.id === activeRoom)?.name || 'art-chat'}`}
+                                    value={inputText}
+                                    onChange={(e) => setInputText(e.target.value)}
+                                    className="flex-1 bg-transparent py-3 text-sm focus:outline-none text-white placeholder:text-gray-600"
+                                />
+                                <button type="submit" className="p-2 text-gray-600 hover:text-hanghive-cyan transition-all">
+                                    <Send className="w-4 h-4" />
+                                </button>
+                            </form>
+                        </div>
+                    </div>
+                )}
+
+                {activeSection.mediaType && mediaItems.filter(i => i.type === activeSection.mediaType).length === 0 && (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center opacity-20 pointer-events-none">
+                        <Palette className="w-14 h-14 mb-4" />
+                        <h3 className="text-lg font-bold uppercase tracking-widest">No {activeSection.label} Yet</h3>
+                        <p className="text-xs mt-2 uppercase tracking-wider">Be the first to inspire the hive</p>
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+};
+
+const ShortsFeed = ({ items }) => {
+    // Helper to extract YouTube ID from various URL formats
+    const getYoutubeId = (url) => {
+        const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?]*).*/;
+        const match = url?.match(regExp);
+        return (match && match[2].length === 11) ? match[2] : null;
+    };
+
+    return (
+        <div className="h-full overflow-y-auto snap-y snap-mandatory scrollbar-hide">
+            {items.map((item, idx) => {
+                const ytId = getYoutubeId(item.url);
+                return (
+                    <div key={idx} className="h-full w-full snap-start relative bg-black flex items-center justify-center">
+                        {ytId ? (
+                            <iframe
+                                className="w-full h-full"
+                                src={`https://www.youtube.com/embed/${ytId}?autoplay=1&mute=1&loop=1&playlist=${ytId}&controls=0`}
+                                title={item.title}
+                                frameBorder="0"
+                                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                                allowFullScreen
+                            />
+                        ) : (
+                            <video
+                                src={item.url}
+                                className="h-full w-auto max-w-full"
+                                autoPlay
+                                loop
+                                muted
+                                playsInline
+                            />
+                        )}
+                        <div className="absolute top-6 left-6 z-10">
+                            <div className="text-white font-black text-xl tracking-tighter uppercase drop-shadow-lg">{item.title}</div>
+                        </div>
+                        <div className="absolute bottom-12 right-6 flex flex-col gap-6">
+                            <button className="flex flex-col items-center gap-1">
+                                <div className="w-12 h-12 rounded-full bg-white/5 backdrop-blur-md flex items-center justify-center border border-white/10 hover:bg-white/20 transition-all text-white">
+                                    <Heart className="w-6 h-6" />
+                                </div>
+                                <span className="text-[10px] font-bold text-white">LIKE</span>
+                            </button>
+                            <button className="flex flex-col items-center gap-1">
+                                <div className="w-12 h-12 rounded-full bg-white/5 backdrop-blur-md flex items-center justify-center border border-white/10 hover:bg-white/20 transition-all text-white">
+                                    <MessageSquare className="w-6 h-6" />
+                                </div>
+                                <span className="text-[10px] font-bold text-white">42</span>
+                            </button>
+                            <button className="flex flex-col items-center gap-1">
+                                <div className="w-12 h-12 rounded-full bg-white/5 backdrop-blur-md flex items-center justify-center border border-white/10 hover:bg-white/20 transition-all text-white">
+                                    <Share2 className="w-6 h-6" />
+                                </div>
+                            </button>
+                        </div>
+                        <div className="absolute bottom-12 left-6 max-w-sm">
+                            <div className="flex items-center gap-3 mb-3">
+                                <div className="w-10 h-10 rounded-xl bg-hanghive-cyan p-[2px]">
+                                    <div className="w-full h-full rounded-xl bg-black flex items-center justify-center font-bold text-hanghive-cyan">A</div>
+                                </div>
+                                <span className="text-sm font-bold text-white uppercase tracking-wider">Artist Node</span>
+                            </div>
+                            <h4 className="text-white text-sm font-medium mb-1">{item.title}</h4>
+                            <div className="flex items-center gap-2 text-hanghive-cyan">
+                                <Music className="w-3 h-3" />
+                                <span className="text-[10px] font-bold uppercase tracking-widest truncate">Original hive audio</span>
+                            </div>
+                        </div>
+                    </div>
+                );
+            })}
+        </div>
+    );
+};
+
+const ExhibitionGrid = ({ items }) => {
+    return (
+        <div className="h-full overflow-y-auto p-6">
+            <div className="columns-2 md:columns-3 lg:columns-4 gap-6 space-y-6">
+                {items.map((item, idx) => (
+                    <motion.div
+                        key={idx}
+                        whileHover={{ y: -5 }}
+                        className="break-inside-avoid relative group rounded-2xl overflow-hidden bg-[#15151e] border border-white/5"
+                    >
+                        <img src={item.url} alt={item.title} className="w-full h-auto" />
+                        <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-all p-4 flex flex-col justify-end">
+                            <h4 className="text-white font-bold text-sm tracking-tight">{item.title}</h4>
+                        </div>
+                    </motion.div>
+                ))}
+            </div>
+        </div>
+    );
+};
+
+const WorkResourceGrid = ({ items }) => {
+    return (
+        <div className="h-full overflow-y-auto p-6">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {items.map((item, idx) => (
+                    <motion.div
+                        key={idx}
+                        whileHover={{ y: -5, scale: 1.02 }}
+                        onClick={() => window.open(item.url, '_blank')}
+                        className="bg-white/5 border border-white/10 rounded-2xl p-6 cursor-pointer hover:bg-white/10 transition-all flex flex-col gap-4 group"
+                    >
+                        <div className="flex items-start justify-between">
+                            <div className="w-12 h-12 rounded-xl bg-hanghive-cyan/10 flex items-center justify-center border border-hanghive-cyan/30">
+                                <FileText className="w-6 h-6 text-hanghive-cyan" />
+                            </div>
+                            <div className="p-2 bg-white/5 rounded-lg opacity-40 group-hover:opacity-100 transition-all">
+                                <Plus className="w-4 h-4 text-white rotate-45" />
+                            </div>
+                        </div>
+                        <div>
+                            <h4 className="text-white font-bold text-lg mb-1">{item.title}</h4>
+                            <p className="text-xs text-gray-500 font-mono tracking-widest break-all">{item.url}</p>
+                        </div>
+                        <div className="mt-2 flex items-center gap-2 text-[10px] font-black text-hanghive-cyan uppercase tracking-tighter">
+                            <span>Access Hub Protocol</span>
+                            <ChevronRight className="w-3 h-3" />
+                        </div>
+                    </motion.div>
+                ))}
+            </div>
+        </div>
+    );
+};
+
+const SCHOOL_SUB_TABS = [
+    { id: 'school-teacher', label: 'Teacher Hub', icon: Library, desc: 'Lesson plans & resources', color: 'from-blue-600/20 to-blue-900/10', border: 'border-blue-500/30' },
+    { id: 'school-student', label: 'Student Space', icon: GraduationCap, desc: 'Submissions & worksheets', color: 'from-cyan-600/20 to-cyan-900/10', border: 'border-cyan-500/30' },
+];
+
+const WorkDashboard = ({ mediaTab, setMediaTab, subTab, setSubTab, mediaItems = [], onUpload,
+    messages = [], inputText, setInputText, handleSend, scrollRef, user, currentRooms = [], activeRoom }) => {
+
+    const activeSection = WORK_TABS.find(t => t.id === mediaTab);
+
+    // ── School Role Selection ────────────────────────
+    const SchoolSelection = () => (
+        <div className="flex-1 flex flex-col items-center justify-center p-8 bg-[#050508] min-h-0 overflow-y-auto">
+            <div className="mb-10 text-center">
+                <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-blue-500/10 border border-blue-500/20 text-blue-400 text-[10px] font-black uppercase tracking-widest mb-4">
+                    <School className="w-3 h-3" /> Educational Node
+                </div>
+                <h1 className="text-4xl font-black text-white tracking-tighter mb-2">Identify Your Protocol</h1>
+                <p className="text-sm text-gray-500">Access role-specific resources and hubs</p>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 w-full max-w-2xl">
+                {SCHOOL_SUB_TABS.map(({ id, label, icon: Icon, desc, color, border }) => (
+                    <motion.div
+                        key={id}
+                        whileHover={{ scale: 1.05, y: -5 }}
+                        whileTap={{ scale: 0.95 }}
+                        onClick={() => setSubTab(id)}
+                        className={`relative flex flex-col gap-5 p-8 rounded-[2rem] bg-gradient-to-br ${color} border ${border} cursor-pointer group overflow-hidden`}
+                    >
+                        <div className={`w-16 h-16 rounded-2xl bg-white/5 border ${border} flex items-center justify-center`}>
+                            <Icon className="w-8 h-8 text-white" />
+                        </div>
+                        <div>
+                            <div className="text-xl font-black text-white tracking-tight leading-none mb-1">{label}</div>
+                            <p className="text-xs text-gray-500 font-medium">{desc}</p>
+                        </div>
+                        <div className="flex items-center gap-2 text-[10px] font-black text-white uppercase tracking-widest mt-2 border-t border-white/5 pt-4">
+                            Establish Link <ChevronRight className="w-3 h-3" />
+                        </div>
+                    </motion.div>
+                ))}
+            </div>
+        </div>
+    );
+
+    // ── Landing grid (no section selected) ────────────────────────
+    const Landing = () => (
+        <div className="flex-1 flex flex-col items-center justify-center p-8 bg-[#050508] min-h-0 overflow-y-auto">
+            <div className="mb-10 text-center">
+                <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-hanghive-cyan/10 border border-hanghive-cyan/20 text-hanghive-cyan text-[10px] font-black uppercase tracking-widest mb-4">
+                    <Briefcase className="w-3 h-3" /> Work Community
+                </div>
+                <h1 className="text-4xl font-black text-white tracking-tighter mb-2">Build & Collaborate</h1>
+                <p className="text-sm text-gray-500">The hive is ready for your next milestone</p>
+            </div>
+
+            <div className="grid grid-cols-2 gap-5 w-full max-w-2xl">
+                {WORK_TABS.map(({ id, label, icon: Icon, mediaType, desc, color, border, accent }) => {
+                    const count = mediaType ? mediaItems.filter(i => i.type === mediaType).length : messages.length;
+                    return (
+                        <motion.div
+                            key={id}
+                            whileHover={{ scale: 1.03, y: -4 }}
+                            whileTap={{ scale: 0.98 }}
+                            onClick={() => setMediaTab(id)}
+                            className={`relative flex flex-col gap-4 p-6 rounded-3xl bg-gradient-to-br ${color} border ${border} cursor-pointer group overflow-hidden`}
+                        >
+                            <div className={`absolute -top-8 -right-8 w-32 h-32 rounded-full bg-gradient-to-br ${color} opacity-30 blur-2xl pointer-events-none`} />
+
+                            <div className={`w-14 h-14 rounded-2xl bg-white/5 border ${border} flex items-center justify-center`}>
+                                <Icon className={`w-7 h-7 ${accent}`} />
+                            </div>
+
+                            <div>
+                                <div className="text-lg font-black text-white tracking-tight">{label}</div>
+                                <div className="text-xs text-gray-500 mt-1">{desc}</div>
+                            </div>
+
+                            <div className="absolute bottom-6 right-6 flex items-center gap-2">
+                                <div className="text-xs font-black text-white">{count}</div>
+                                <div className={`w-1.5 h-1.5 rounded-full ${count > 0 ? 'bg-green-500' : 'bg-gray-700'}`} />
+                            </div>
+                        </motion.div>
+                    );
+                })}
+            </div>
+        </div>
+    );
+
+    return (
+        <div className="flex-1 flex flex-col relative h-full overflow-hidden">
+            <AnimatePresence mode="wait">
+                {!mediaTab ? (
+                    <motion.div
+                        key="landing"
+                        initial={{ opacity: 0, y: 20 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, scale: 0.95 }}
+                        className="flex-1 overflow-hidden"
+                    >
+                        <Landing />
+                    </motion.div>
+                ) : mediaTab === 'school' && !subTab ? (
+                    <motion.div
+                        key="school-selection"
+                        initial={{ opacity: 0, scale: 0.9 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        className="flex-1 overflow-hidden"
+                    >
+                        <div className="h-14 flex items-center px-6 border-b border-white/5 bg-[#050508]/80 backdrop-blur-md sticky top-0 z-20">
+                            <button
+                                onClick={() => setMediaTab(null)}
+                                className="mr-4 p-2 hover:bg-white/5 rounded-full text-gray-400 hover:text-white transition-all"
+                            >
+                                <SkipBack className="w-5 h-5" />
+                            </button>
+                            <span className="text-sm font-black text-white uppercase tracking-tighter">SCHOOL_RESOURCES</span>
+                        </div>
+                        <SchoolSelection />
+                    </motion.div>
+                ) : (
+                    <motion.div
+                        key="section"
+                        initial={{ opacity: 0, x: 20 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        className="flex-1 flex flex-col overflow-hidden"
+                    >
+                        {/* Section Header */}
+                        <div className="h-14 flex items-center px-6 border-b border-white/5 bg-[#050508]/80 backdrop-blur-md sticky top-0 z-20">
+                            <button
+                                onClick={() => subTab ? setSubTab(null) : setMediaTab(null)}
+                                className="mr-4 p-2 hover:bg-white/5 rounded-full text-gray-400 hover:text-white transition-all"
+                            >
+                                <SkipBack className="w-5 h-5" />
+                            </button>
+                            <div className="flex items-center gap-2">
+                                {subTab ? (
+                                    <>
+                                        {(() => {
+                                            const s = SCHOOL_SUB_TABS.find(t => t.id === subTab);
+                                            const Icon = s.icon;
+                                            return <Icon className="w-4 h-4 text-blue-400" />;
+                                        })()}
+                                        <span className="text-sm font-black text-white uppercase tracking-tighter">{SCHOOL_SUB_TABS.find(t => t.id === subTab)?.label}</span>
+                                    </>
+                                ) : (
+                                    <>
+                                        <activeSection.icon className={`w-4 h-4 ${activeSection.accent}`} />
+                                        <span className="text-sm font-black text-white uppercase tracking-tighter">{activeSection.label}</span>
+                                    </>
+                                )}
+                            </div>
+
+                            {(activeSection?.mediaType || subTab) && (
+                                <button
+                                    onClick={() => onUpload(subTab || activeSection.mediaType)}
+                                    className={`ml-auto px-4 py-1.5 rounded-full bg-white/5 border ${activeSection?.border || 'border-blue-500/20'} text-[10px] font-black text-white hover:bg-white/10 transition-all flex items-center gap-2`}
+                                >
+                                    <Plus className="w-3 h-3" /> PUSH_DATA
+                                </button>
+                            )}
+                        </div>
+
+                        {/* Section Content */}
+                        <div className="flex-1 overflow-hidden relative">
+                            {mediaTab === 'chat' ? (
+                                <div className="h-full flex flex-col bg-[#050508]">
+                                    <div className="flex-1 overflow-y-auto p-4 space-y-4">
+                                        {messages.slice(-50).map((msg, i) => (
+                                            <div key={i} className={`flex gap-3 group/msg ${msg.isSystem ? 'justify-center py-4' : ''}`}>
+                                                {msg.isSystem ? (
+                                                    <div className="px-4 py-1.5 rounded-full bg-white/5 border border-white/10 text-[10px] font-black text-gray-500 uppercase tracking-widest">
+                                                        {msg.content}
+                                                    </div>
+                                                ) : (
+                                                    <>
+                                                        <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-white/10 to-white/5 p-[1px]">
+                                                            <div className="w-full h-full rounded-xl bg-[#0a0a0f] flex items-center justify-center font-bold text-gray-400">
+                                                                {msg.sender?.username?.slice(0, 2).toUpperCase() || 'U'}
+                                                            </div>
+                                                        </div>
+                                                        <div className="flex-1">
+                                                            <div className="flex items-center gap-2">
+                                                                <span className="text-xs font-black text-white tracking-tight">{msg.sender?.username}</span>
+                                                                <span className="text-[10px] text-gray-600 font-mono">
+                                                                    {new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                                                </span>
+                                                            </div>
+                                                            <div className="text-sm text-gray-300 leading-relaxed mt-0.5">{msg.content}</div>
+                                                        </div>
+                                                    </>
+                                                )}
+                                            </div>
+                                        ))}
+                                        <div ref={scrollRef} />
+                                    </div>
+                                    <div className="p-4">
+                                        <form onSubmit={handleSend} className="bg-[#15151e] rounded-xl border border-white/5 focus-within:border-hanghive-cyan/30 transition-all flex items-center px-4">
+                                            <div className="w-6 h-6 rounded-full bg-white/5 flex items-center justify-center mr-3 hover:bg-white/10 cursor-pointer">
+                                                <Plus className="w-4 h-4 text-gray-400" />
+                                            </div>
+                                            <input
+                                                type="text"
+                                                placeholder={`Message in work-chat`}
+                                                value={inputText}
+                                                onChange={(e) => setInputText(e.target.value)}
+                                                className="flex-1 bg-transparent py-3 text-sm focus:outline-none text-white placeholder:text-gray-600"
+                                            />
+                                            <button type="submit" className="p-2 text-gray-600 hover:text-hanghive-cyan transition-all">
+                                                <Send className="w-4 h-4" />
+                                            </button>
+                                        </form>
+                                    </div>
+                                </div>
+                            ) : (
+                                <WorkResourceGrid items={mediaItems.filter(i => i.type === (subTab || activeSection.mediaType))} />
+                            )}
+
+                            {(activeSection?.mediaType || subTab) && mediaItems.filter(i => i.type === (subTab || activeSection.mediaType)).length === 0 && (
+                                <div className="absolute inset-0 flex flex-col items-center justify-center opacity-20 pointer-events-none">
+                                    <activeSection.icon className="w-14 h-14 mb-4" />
+                                    <h3 className="text-lg font-bold uppercase tracking-widest">No Resources Yet</h3>
+                                    <p className="text-xs mt-2 uppercase tracking-wider">Initialize the first data node</p>
+                                </div>
+                            )}
+                        </div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+        </div>
+    );
+};
+const StudioPlayer = ({ items }) => {
+    const [currentTrack, setCurrentTrack] = useState(null);
+
+    return (
+        <div className="h-full flex flex-col bg-[#050508]">
+            <div className="flex-1 overflow-y-auto p-8">
+                <div className="flex items-end gap-8 mb-12">
+                    <div className="w-64 h-64 bg-gradient-to-br from-hanghive-cyan/20 to-hanghive-purple/20 rounded-3xl flex items-center justify-center border border-white/5 shadow-2xl">
+                        <Music2 className="w-24 h-24 text-hanghive-cyan opacity-20" />
+                    </div>
+                    <div>
+                        <span className="text-[10px] font-bold text-gray-500 uppercase tracking-[0.3em]">COLLECTION</span>
+                        <h1 className="text-6xl font-black text-white mt-2 mb-6 tracking-tighter">Art Community Studio</h1>
+                        <div className="flex items-center gap-3">
+                            <div className="w-8 h-8 rounded-full bg-hanghive-cyan"></div>
+                            <span className="text-sm font-bold text-white">Hive Collective</span>
+                            <span className="text-gray-500">•</span>
+                            <span className="text-sm text-gray-400 font-medium">{items.length} tracks</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div className="space-y-1">
+                    <div className="grid grid-cols-[48px_1fr_1fr_48px] px-4 py-2 text-[10px] font-bold text-gray-600 uppercase tracking-widest border-b border-white/5 mb-4">
+                        <span>#</span>
+                        <span>Title</span>
+                        <span>Creator</span>
+                        <span className="justify-self-end text-right">Dur</span>
+                    </div>
+                    {items.map((item, idx) => (
+                        <div
+                            key={idx}
+                            onClick={() => setCurrentTrack(item)}
+                            className="grid grid-cols-[48px_1fr_1fr_48px] items-center px-4 py-3 rounded-xl hover:bg-white/5 cursor-pointer group transition-all"
+                        >
+                            <span className="text-xs font-mono text-gray-500 group-hover:text-hanghive-cyan">
+                                {idx + 1 < 10 ? `0${idx + 1}` : idx + 1}
+                            </span>
+                            <div className="flex items-center gap-3">
+                                <div className="w-10 h-10 rounded-lg bg-white/5 flex items-center justify-center">
+                                    <Play className="w-4 h-4 text-white/20 group-hover:text-hanghive-cyan" />
+                                </div>
+                                <span className="text-sm font-bold text-white">{item.title}</span>
+                            </div>
+                            <span className="text-xs text-gray-400 font-medium tracking-wide uppercase">Artist Node</span>
+                            <span className="text-xs font-mono text-gray-500 justify-self-end">3:42</span>
+                        </div>
+                    ))}
+                </div>
+            </div>
+
+            {/* Spotify-style Player Bar */}
+            {currentTrack && (
+                <div className="h-24 bg-[#0a0a0f] border-t border-white/5 px-6 flex items-center justify-between">
+                    <div className="flex items-center gap-4 w-[30%]">
+                        <div className="w-14 h-14 rounded-xl bg-hanghive-cyan/20 flex items-center justify-center">
+                            <Music className="w-6 h-6 text-hanghive-cyan" />
+                        </div>
+                        <div className="min-w-0">
+                            <div className="text-sm font-bold text-white truncate">{currentTrack.title}</div>
+                            <div className="text-[10px] text-gray-500 font-bold tracking-widest uppercase">Artist Node</div>
+                        </div>
+                        <Heart className="w-4 h-4 text-gray-600 hover:text-hanghive-cyan ml-2 cursor-pointer" />
+                    </div>
+
+                    <div className="flex flex-col items-center gap-2 flex-1 max-w-xl">
+                        <div className="flex items-center gap-6">
+                            <SkipBack className="w-5 h-5 text-gray-500 hover:text-white cursor-pointer" />
+                            <button className="w-10 h-10 rounded-full bg-white flex items-center justify-center text-black hover:scale-105 transition-all">
+                                <Play className="w-5 h-5 fill-current" />
+                            </button>
+                            <SkipForward className="w-5 h-5 text-gray-500 hover:text-white cursor-pointer" />
+                        </div>
+                        <div className="w-full flex items-center gap-3 text-[10px] font-mono text-gray-600 font-bold">
+                            <span>1:24</span>
+                            <div className="flex-1 h-1 bg-white/10 rounded-full relative overflow-hidden">
+                                <div className="absolute inset-y-0 left-0 w-[40%] bg-hanghive-cyan rounded-full" />
+                            </div>
+                            <span>3:42</span>
+                        </div>
+                    </div>
+
+                    <div className="flex items-center justify-end gap-4 w-[30%]">
+                        <List className="w-4 h-4 text-gray-500 hover:text-white cursor-pointer" />
+                        <Volume2 className="w-4 h-4 text-gray-500 hover:text-white cursor-pointer" />
+                        <div className="w-24 h-1 bg-white/10 rounded-full">
+                            <div className="w-[60%] h-full bg-hanghive-cyan rounded-full" />
+                        </div>
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+};
+
+// ─── Multimedia Upload Modal ──────────────────────────────────────
+
+const UploadModal = ({ isOpen, onClose, uploadType, onUploadSuccess, currentCommunity, user }) => {
+    const [title, setTitle] = useState('');
+    const [url, setUrl] = useState('');
+    const [type, setType] = useState(uploadType || 'image');
+    const [isSubmitting, setIsSubmitting] = useState(false);
+
+    useEffect(() => {
+        if (uploadType) setType(uploadType);
+    }, [uploadType]);
+
+    if (!isOpen) return null;
+
+    const isArt = currentCommunity?.purpose === 'art';
+    const isWork = currentCommunity?.purpose === 'work';
+
+    const categories = isArt ? [
+        { id: 'video', label: 'Video (Shorts)', icon: Play },
+        { id: 'image', label: 'Image (Exhibition)', icon: Layout },
+        { id: 'audio', label: 'Audio (Studio)', icon: Music2 },
+    ] : isWork ? [
+        { id: 'school-teacher', label: 'Teacher Resource', icon: Library },
+        { id: 'school-student', label: 'Student Material', icon: GraduationCap },
+        { id: 'college', label: 'College Material', icon: University },
+        { id: 'office', label: 'Office Asset', icon: Building2 },
+        { id: 'other', label: 'Other Work', icon: Package },
+    ] : [
+        { id: 'image', label: 'General File', icon: Layout }
+    ];
+
+    const handleSubmit = async (e) => {
+        e.preventDefault();
+
+        if (!user?.id || !currentCommunity?.id) {
+            alert("Error: Missing user or community identification.");
+            return;
+        }
+
+        const ownerId = Number(user?.id);
+        const communityId = Number(currentCommunity?.id);
+
+        if (isNaN(ownerId) || isNaN(communityId)) {
+            console.error("[UPLOAD_DEBUG] ID conversion failed:", { ownerId: user?.id, communityId: currentCommunity?.id });
+            alert(`Error: Invalid identification data. (Owner: ${user?.id}, Comm: ${currentCommunity?.id})`);
+            setIsSubmitting(false);
+            return;
+        }
+
+        // Explicitly cast IDs to numbers just in case they are strings,
+        // as the backend MediaItemCreate schema expects integers.
+        const payload = {
+            title,
+            url: url.trim(), // Remove any trailing spaces which might cause 422
+            type,
+            owner_id: ownerId,
+            community_id: communityId
+        };
+
+        try {
+            console.log("[UPLOAD_DEBUG] Initiating upload with payload:", payload);
+            const res = await fetch(`${CONFIG.API_BASE_URL}/media/`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
+            if (res.ok) {
+                const result = await res.json();
+                console.log("[UPLOAD_DEBUG] Upload successful:", result);
+                alert("Upload Successful! Your creation has been added.");
+                onUploadSuccess(type);
+                onClose();
+                setTitle('');
+                setUrl('');
+            } else {
+                const errorData = await res.json().catch(() => ({}));
+                console.error("[UPLOAD_DEBUG] Upload failed with status:", res.status, errorData);
+                const detail = typeof errorData.detail === 'string'
+                    ? errorData.detail
+                    : JSON.stringify(errorData.detail || 'Internal Server Error');
+                alert(`Upload failed: ${res.status} ${detail}`);
+            }
+        } catch (err) {
+            console.error("[UPLOAD_DEBUG] Network/Critical error:", err);
+            alert(`A critical error occurred: ${err.message}`);
+        } finally {
+            setIsSubmitting(false);
+        }
+    };
+
+    return (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-black/60 backdrop-blur-sm">
+            <motion.div
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                className="w-full max-w-md bg-[#0a0a0f] border border-white/10 rounded-3xl p-8 shadow-2xl"
+            >
+                <div className="flex items-center justify-between mb-8">
+                    <h2 className="text-xl font-black text-white uppercase tracking-tighter">Share Creation</h2>
+                    <button onClick={onClose} className="text-gray-500 hover:text-white transition-all">
+                        <Plus className="w-6 h-6 rotate-45" />
+                    </button>
+                </div>
+
+                <form onSubmit={handleSubmit} className="space-y-6">
+                    <div>
+                        <label className="block text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-2">Media Type</label>
+                        <div className="grid grid-cols-3 gap-2">
+                            {['image', 'video', 'audio'].map((t) => (
+                                <button
+                                    key={t}
+                                    type="button"
+                                    onClick={() => setType(t)}
+                                    className={`py-2 rounded-xl text-[10px] font-bold uppercase tracking-widest border transition-all ${type === t ? 'bg-hanghive-cyan/10 border-hanghive-cyan text-hanghive-cyan' : 'bg-white/5 border-white/5 text-gray-500'}`}
+                                >
+                                    {t}
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+
+                    <div>
+                        <label className="block text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-2">Creation Title</label>
+                        <input
+                            type="text"
+                            value={title}
+                            onChange={(e) => setTitle(e.target.value)}
+                            required
+                            placeholder="Enter a title..."
+                            className="w-full bg-white/5 border border-white/5 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-hanghive-cyan/30 placeholder:text-gray-700 transition-all font-medium"
+                        />
+                    </div>
+
+                    <div>
+                        <label className="block text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-2">Resource URL</label>
+                        <input
+                            type="url"
+                            value={url}
+                            onChange={(e) => setUrl(e.target.value)}
+                            required
+                            placeholder="https://example.com/media.mp4"
+                            className="w-full bg-white/5 border border-white/5 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-hanghive-cyan/30 placeholder:text-gray-700 transition-all font-mono"
+                        />
+                    </div>
+
+                    <button
+                        type="submit"
+                        disabled={isSubmitting}
+                        className="w-full py-4 bg-hanghive-cyan text-black font-black uppercase tracking-widest rounded-xl hover:scale-[1.02] active:scale-95 transition-all disabled:opacity-50"
+                    >
+                        {isSubmitting ? 'TRANSMITTING...' : 'INITIATE UPLOAD'}
+                    </button>
+                </form>
+            </motion.div>
+        </div>
     );
 };
 
