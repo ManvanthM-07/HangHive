@@ -2261,10 +2261,11 @@ const WorkDashboard = ({ mediaTab, setMediaTab, subTab, setSubTab, mediaItems = 
                             )}
                         </div>
 
-                        {/* Section Content */}
-                        <div className="flex-1 overflow-hidden relative">
+                        {/* Section Content — split view for school sub-tabs, full view otherwise */}
+                        <div className="flex-1 overflow-hidden relative flex">
                             {mediaTab === 'chat' ? (
-                                <div className="h-full flex flex-col bg-[#050508]">
+                                /* ── Main work-chat ─────────────────────────────  */
+                                <div className="h-full w-full flex flex-col bg-[#050508]">
                                     <div className="flex-1 overflow-y-auto p-4 space-y-4">
                                         {messages.slice(-50).map((msg, i) => (
                                             <div key={i} className={`flex gap-3 group/msg ${msg.isSystem ? 'justify-center py-4' : ''}`}>
@@ -2312,18 +2313,92 @@ const WorkDashboard = ({ mediaTab, setMediaTab, subTab, setSubTab, mediaItems = 
                                         </form>
                                     </div>
                                 </div>
-                            ) : (
-                                <WorkResourceGrid items={mediaItems.filter(i => i.type === (subTab || activeSection.mediaType))} />
-                            )}
+                            ) : subTab ? (
+                                /* ── School sub-tab: resources LEFT + chat RIGHT ── */
+                                <>
+                                    {/* Resources panel */}
+                                    <div className="flex-1 overflow-y-auto border-r border-white/5 relative">
+                                        <WorkResourceGrid items={mediaItems.filter(i => i.type === subTab)} />
+                                        {mediaItems.filter(i => i.type === subTab).length === 0 && (
+                                            <div className="absolute inset-0 flex flex-col items-center justify-center opacity-20 pointer-events-none">
+                                                {(() => { const s = SCHOOL_SUB_TABS.find(t => t.id === subTab); const Icon = s?.icon || Library; return <Icon className="w-14 h-14 mb-4" />; })()}
+                                                <h3 className="text-lg font-bold uppercase tracking-widest">No Resources Yet</h3>
+                                                <p className="text-xs mt-2 uppercase tracking-wider">Upload the first file above</p>
+                                            </div>
+                                        )}
+                                    </div>
 
-                            {(activeSection?.mediaType || subTab) && mediaItems.filter(i => i.type === (subTab || activeSection.mediaType)).length === 0 && (
-                                <div className="absolute inset-0 flex flex-col items-center justify-center opacity-20 pointer-events-none">
-                                    <activeSection.icon className="w-14 h-14 mb-4" />
-                                    <h3 className="text-lg font-bold uppercase tracking-widest">No Resources Yet</h3>
-                                    <p className="text-xs mt-2 uppercase tracking-wider">Initialize the first data node</p>
-                                </div>
+                                    {/* Chat panel */}
+                                    <div className="w-80 flex flex-col bg-[#050508]">
+                                        <div className="h-10 flex items-center px-4 border-b border-white/5">
+                                            <MessageSquare className="w-3 h-3 text-blue-400 mr-2" />
+                                            <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest">
+                                                {SCHOOL_SUB_TABS.find(t => t.id === subTab)?.label} Chat
+                                            </span>
+                                        </div>
+                                        <div className="flex-1 overflow-y-auto p-3 space-y-3">
+                                            {messages.length === 0 ? (
+                                                <div className="h-full flex flex-col items-center justify-center opacity-30 text-center px-4">
+                                                    <MessageSquare className="w-8 h-8 mb-3 text-blue-400" />
+                                                    <p className="text-xs font-bold text-gray-500 uppercase tracking-wider">No messages yet</p>
+                                                    <p className="text-[10px] text-gray-600 mt-1">Start the conversation below</p>
+                                                </div>
+                                            ) : (
+                                                messages.slice(-50).map((msg, i) => (
+                                                    <div key={i} className={`flex gap-2 ${msg.isSystem ? 'justify-center' : ''}`}>
+                                                        {msg.isSystem ? (
+                                                            <div className="px-3 py-1 rounded-full bg-white/5 border border-white/10 text-[10px] font-black text-gray-500 uppercase tracking-widest">
+                                                                {msg.content}
+                                                            </div>
+                                                        ) : (
+                                                            <>
+                                                                <div className="w-7 h-7 rounded-lg bg-blue-500/20 flex items-center justify-center font-bold text-blue-400 text-[10px] shrink-0 mt-0.5">
+                                                                    {(msg.sender?.username || msg.sender_name || 'U').slice(0, 2).toUpperCase()}
+                                                                </div>
+                                                                <div className="flex-1 min-w-0">
+                                                                    <div className="flex items-baseline gap-1.5">
+                                                                        <span className="text-[11px] font-black text-white">{msg.sender?.username || msg.sender_name || `User`}</span>
+                                                                        <span className="text-[9px] text-gray-600 font-mono">{new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                                                                    </div>
+                                                                    <div className="text-xs text-gray-300 leading-relaxed mt-0.5 break-words">{msg.content}</div>
+                                                                </div>
+                                                            </>
+                                                        )}
+                                                    </div>
+                                                ))
+                                            )}
+                                            <div ref={scrollRef} />
+                                        </div>
+                                        <div className="p-2 border-t border-white/5">
+                                            <form onSubmit={handleSend} className="bg-[#15151e] rounded-lg border border-white/5 focus-within:border-blue-500/30 transition-all flex items-center px-3">
+                                                <input
+                                                    type="text"
+                                                    placeholder="Message..."
+                                                    value={inputText}
+                                                    onChange={(e) => setInputText(e.target.value)}
+                                                    className="flex-1 bg-transparent py-2.5 text-xs focus:outline-none text-white placeholder:text-gray-600"
+                                                />
+                                                <button type="submit" className="p-1.5 text-gray-600 hover:text-blue-400 transition-all">
+                                                    <Send className="w-3.5 h-3.5" />
+                                                </button>
+                                            </form>
+                                        </div>
+                                    </div>
+                                </>
+                            ) : (
+                                /* ── Non-school section (College, Office, Other) ── */
+                                <>
+                                    <WorkResourceGrid items={mediaItems.filter(i => i.type === activeSection?.mediaType)} />
+                                    {activeSection?.mediaType && mediaItems.filter(i => i.type === activeSection.mediaType).length === 0 && (
+                                        <div className="absolute inset-0 flex flex-col items-center justify-center opacity-20 pointer-events-none">
+                                            <activeSection.icon className="w-14 h-14 mb-4" />
+                                            <h3 className="text-lg font-bold uppercase tracking-widest">No Resources Yet</h3>
+                                            <p className="text-xs mt-2 uppercase tracking-wider">Initialize the first data node</p>
+                                        </div>
+                                    )}
+                                </>
                             )}
-                        </div>
+                        </div>{/* end section content */}
                     </motion.div>
                 )}
             </AnimatePresence>
