@@ -2469,7 +2469,14 @@ const UploadModal = ({ isOpen, onClose, uploadType, onUploadSuccess, currentComm
 
         if (isNaN(ownerId) || isNaN(communityId)) {
             console.error("[UPLOAD_DEBUG] ID conversion failed:", { ownerId: user?.id, communityId: currentCommunity?.id });
-            alert(`Error: Invalid identification data. (Owner: ${user?.id}, Comm: ${currentCommunity?.id})`);
+            // This happens when a system community is stored with the old string ID (e.g. "system_art").
+            // The backend API now returns real integer IDs — the user just needs to re-join
+            // the community from the Discovery panel to pick up the new ID.
+            alert(
+                "This community needs to be refreshed.\n\n" +
+                "Please click the 🔍 Discovery button, find this community, and click Join again. " +
+                "This is a one-time step to sync with the updated backend."
+            );
             setIsSubmitting(false);
             return;
         }
